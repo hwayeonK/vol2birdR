@@ -132,8 +132,12 @@ private:
     alldata->options.dealiasRecycle = FALSE;
     alldata->options.dualPol = TRUE;
     alldata->options.singlePol = TRUE;
+    alldata->options.texCell = FALSE;
     alldata->options.dbzThresMin = 0.0;
     alldata->options.rhohvThresMin = 0.95;
+    alldata->options.texThresMax = 1.0;
+    alldata->options.texMask = TRUE;
+    alldata->options.texMaskDbzMin = 0.0;
     alldata->options.resample = FALSE;
     alldata->options.resampleRscale = 500.0;
     alldata->options.resampleNbins = 100;
@@ -231,8 +235,12 @@ public:
     _alldata.options.dealiasRecycle = other._alldata.options.dealiasRecycle;
     _alldata.options.dualPol = other._alldata.options.dualPol;
     _alldata.options.singlePol = other._alldata.options.singlePol;
+    _alldata.options.texCell = other._alldata.options.texCell;
     _alldata.options.dbzThresMin = other._alldata.options.dbzThresMin;
     _alldata.options.rhohvThresMin = other._alldata.options.rhohvThresMin;
+    _alldata.options.texThresMax = other._alldata.options.texThresMax;
+    _alldata.options.texMask = other._alldata.options.texMask;
+    _alldata.options.texMaskDbzMin = other._alldata.options.texMaskDbzMin;
     _alldata.options.resample = other._alldata.options.resample;
     _alldata.options.resampleRscale = other._alldata.options.resampleRscale;
     _alldata.options.resampleNbins = other._alldata.options.resampleNbins;
@@ -558,6 +566,13 @@ public:
     _alldata.options.singlePol = v == true ? TRUE : FALSE;
   }
 
+  bool get_texCell() {
+    return _alldata.options.texCell == TRUE ? true : false;
+  }
+  void set_texCell(bool v) {
+    _alldata.options.texCell = v == true ? TRUE : FALSE;
+  }
+
   double get_dbzThresMin() {
     return _alldata.options.dbzThresMin;
   }
@@ -570,6 +585,27 @@ public:
   }
   void set_rhohvThresMin(double v) {
     _alldata.options.rhohvThresMin = v;
+  }
+
+  double get_texThresMax() {
+    return _alldata.options.texThresMax;
+  }
+  void set_texThresMax(double v) {
+    _alldata.options.texThresMax = v;
+  }
+
+  bool get_texMask() {
+    return _alldata.options.texMask == TRUE ? true : false;
+  }
+  void set_texMask(bool v) {
+    _alldata.options.texMask = v == true ? TRUE : FALSE;
+  }
+
+  double get_texMaskDbzMin() {
+    return _alldata.options.texMaskDbzMin;
+  }
+  void set_texMaskDbzMin(double v) {
+    _alldata.options.texMaskDbzMin = v;
   }
 
   bool get_resample() {
@@ -1074,8 +1110,12 @@ RCPP_MODULE(Vol2BirdConfig) {
       .property("dealiasRecycle", &Vol2BirdConfig::get_dealiasRecycle, &Vol2BirdConfig::set_dealiasRecycle)
       .property("dualPol", &Vol2BirdConfig::get_dualPol, &Vol2BirdConfig::set_dualPol)
       .property("singlePol", &Vol2BirdConfig::get_singlePol, &Vol2BirdConfig::set_singlePol)
+      .property("texCell", &Vol2BirdConfig::get_texCell, &Vol2BirdConfig::set_texCell)
       .property("dbzThresMin", &Vol2BirdConfig::get_dbzThresMin, &Vol2BirdConfig::set_dbzThresMin)
       .property("rhohvThresMin", &Vol2BirdConfig::get_rhohvThresMin, &Vol2BirdConfig::set_rhohvThresMin)
+      .property("texThresMax", &Vol2BirdConfig::get_texThresMax, &Vol2BirdConfig::set_texThresMax)
+      .property("texMask", &Vol2BirdConfig::get_texMask, &Vol2BirdConfig::set_texMask)
+      .property("texMaskDbzMin", &Vol2BirdConfig::get_texMaskDbzMin, &Vol2BirdConfig::set_texMaskDbzMin)
       .property("resample", &Vol2BirdConfig::get_resample, &Vol2BirdConfig::set_resample)
       .property("resampleRscale", &Vol2BirdConfig::get_resampleRscale, &Vol2BirdConfig::set_resampleRscale)
       .property("resampleNbins", &Vol2BirdConfig::get_resampleNbins, &Vol2BirdConfig::set_resampleNbins)

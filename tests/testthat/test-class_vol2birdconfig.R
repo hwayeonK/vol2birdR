@@ -284,6 +284,34 @@ test_that("rhohvThresMin",{
   expect_equal(a$rhohvThresMin, 4.0, tolerance = 0.0001)
 })
 
+test_that("texCell",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$texCell, FALSE)
+  a$texCell<-TRUE
+  expect_equal(a$texCell, TRUE)
+})
+
+test_that("texThresMax",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$texThresMax, 1.0, tolerance = 0.0001)
+  a$texThresMax<-4.0
+  expect_equal(a$texThresMax, 4.0, tolerance = 0.0001)
+})
+
+test_that("texMask",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$texMask, TRUE)
+  a$texMask<-FALSE
+  expect_equal(a$texMask, FALSE)
+})
+
+test_that("texMaskDbzMin",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$texMaskDbzMin, 0.0, tolerance = 0.0001)
+  a$texMaskDbzMin<-7.0
+  expect_equal(a$texMaskDbzMin, 7.0, tolerance = 0.0001)
+})
+
 test_that("resample",{
   a<-Vol2BirdConfig$new()
   expect_equal(a$resample, FALSE)
