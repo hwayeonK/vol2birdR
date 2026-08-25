@@ -1307,6 +1307,58 @@ static void exportBirdProfileAsJSON(vol2bird_t *alldata) {
 
 
 
+// ------------------------------------------------------------- //
+//  Union-find used to merge cell labels: path halving in         //
+//  uf_find(), union by rank in uf_unite()                        //
+// ------------------------------------------------------------- //
+
+static int* uf_parent = NULL;
+static int* uf_rank   = NULL;
+
+static void uf_free(void) {
+    free(uf_parent);
+    free(uf_rank);
+    uf_parent = NULL;
+    uf_rank   = NULL;
+}
+
+static int uf_init(int n) {
+    uf_parent = (int*) malloc(n * sizeof(int));
+    uf_rank   = (int*) calloc(n, sizeof(int));
+    if (uf_parent == NULL || uf_rank == NULL) {
+        uf_free();
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        uf_parent[i] = i;
+    }
+    return 1;
+}
+
+static int uf_find(int x) {
+    while (uf_parent[x] != x) {
+        uf_parent[x] = uf_parent[uf_parent[x]];   // path halving
+        x = uf_parent[x];
+    }
+    return x;
+}
+
+static void uf_unite(int a, int b) {
+    int ra = uf_find(a);
+    int rb = uf_find(b);
+    if (ra == rb) return;
+    // union by rank
+    if (uf_rank[ra] < uf_rank[rb]) {
+        uf_parent[ra] = rb;
+    } else if (uf_rank[ra] > uf_rank[rb]) {
+        uf_parent[rb] = ra;
+    } else {
+        uf_parent[rb] = ra;
+        uf_rank[ra]++;
+    }
+}
+
+
 static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quantityThreshold,
         int selectAboveThreshold, int iCellStart, int initialize, vol2bird_t* alldata) {
 
@@ -1332,7 +1384,6 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
     float quantityThres;
 
     int iGlobal;
-    int iGlobalOther;
     int nGlobal;
     int iLocal;
 
@@ -1364,7 +1415,6 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
 
     int cellIdentifierGlobal;
     int cellIdentifierGlobalOther;
-    int iGlobalInner;
 
 
     #ifdef FPRINTFON
@@ -1425,6 +1475,15 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
       }
     }
   }
+
+    // Initialize Union-Find for fast cell merging
+    int ufMaxId = iCellStart + nGlobal + 1;
+    if (!uf_init(ufMaxId)) {
+        RAVE_OBJECT_RELEASE(scanParam);
+        RAVE_OBJECT_RELEASE(cellParam);
+        vol2bird_err_printf("Failed to allocate the union-find arrays in findWeatherCells\n");
+        return -1;
+    }
 
     // If threshold value is equal to missing value, produce a warning
     if (quantityThres == quantityMissing) {
@@ -1541,13 +1600,8 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
                 else {
                     // if connection found but pixel is already assigned a different iCellIdentifier:
                     if (cellValueGlobal != cellValueLocal) {
-                        // merging cells detected: replace all other occurences by value of connection:
-                        for (iGlobalOther = 0; iGlobalOther < nGlobal; iGlobalOther++) {
-                            if (cellParamData[iGlobalOther] == cellValueGlobal) {
-                                cellParamData[iGlobalOther] = cellValueLocal;
-                            }
-                            // note: not all iCellIdentifier need to be used eventually
-                        }
+                        // record the merge; labels are rewritten after the labelling loop
+                        uf_unite((int) cellValueGlobal, (int) cellValueLocal);
                     }
                 }
             }
@@ -1577,30 +1631,31 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
         // index 1 in a 3x3 child array refers to the cell that is a direct neighbor of
         // iGlobal, but on the other side of the array (because the polar plot is wrapped
         // in the azimuth dimension):
-        iGlobalOther = findNearbyGateIndex(nAzim,nRang,iGlobal,3,3,1,&iAzimLocal,&iRangLocal);
+        findNearbyGateIndex(nAzim,nRang,iGlobal,3,3,1,&iAzimLocal,&iRangLocal);
         PolarScanParam_getValue(cellParam, iRangLocal, iAzimLocal, &cellValueOther);
 
         #ifdef FPRINTFON
-        vol2bird_err_printf("iGlobal = %d, iGlobalOther = %d\n",iGlobal,iGlobalOther);
+        vol2bird_err_printf("iGlobal = %d, iGlobalOther = %d\n",iGlobal,iAzimLocal * nRang + iRangLocal);
         #endif
 
         cellIdentifierGlobal = cellValueGlobal;
         cellIdentifierGlobalOther = cellValueOther;
         if (cellIdentifierGlobal != cellImageInitialValue && cellIdentifierGlobalOther != cellImageInitialValue ) {
-            // adjacent gates, both part of a cell -> assign them the same identifier, i.e. assign
-            // all elements of cellImage that are equal to cellImage[iGlobalOther] the value of
-            // cellImage[iGlobal]
+            // adjacent gates, both part of a cell -> merge via Union-Find
+            uf_unite(cellIdentifierGlobal, cellIdentifierGlobalOther);
+        }
+    }
 
-            for (iGlobalInner = 0; iGlobalInner < nGlobal; iGlobalInner++) {
-                if (cellParamData[iGlobalInner] == cellIdentifierGlobalOther) {
-                    cellParamData[iGlobalInner] = cellIdentifierGlobal;
-                }
-            }
+    // resolve all cell labels through Union-Find
+    for (iGlobal = 0; iGlobal < nGlobal; iGlobal++) {
+        if (cellParamData[iGlobal] != cellImageInitialValue) {
+            cellParamData[iGlobal] = uf_find(cellParamData[iGlobal]);
         }
     }
 
     // Returning number of detected cells (including fringe/clutter)
     nCells = iCellIdentifier;
+    uf_free();
 
     RAVE_OBJECT_RELEASE(scanParam);
     RAVE_OBJECT_RELEASE(cellParam);
@@ -3966,7 +4021,6 @@ static int updateMap(PolarScan_t* scan, CELLPROP *cellProp, const int nCells, vo
 
     int iGlobal;
     int iCell;
-    int iCellNew;
     int nCellsValid;
     int cellImageValue;
 
@@ -4029,61 +4083,46 @@ static int updateMap(PolarScan_t* scan, CELLPROP *cellProp, const int nCells, vo
     vol2bird_err_printf("\n");
     #endif
 
-    // replace the values in cellImage with newly calculated index values:
-    for (iCell = 0; iCell < nCells; iCell++) {
-
-        if (iCell < nCellsValid) {
-            iCellNew = -1 * (iCell + 2 + 100);
+    // renumber through a lookup table indexed by the old cellImage value:
+    // O(nCells + nGlobal) instead of a nested O(nCells x nGlobal) loop
+    {
+        // Determine maximum old index to size the lookup table.
+        int maxOldIdx = 0;
+        for (int i = 0; i < nCells; i++) {
+            if (cellProp[i].index > maxOldIdx) maxOldIdx = cellProp[i].index;
         }
-        else {
-            iCellNew = -1;
+        int mapSize = maxOldIdx + 1;
+        int *indexMap = malloc(mapSize * sizeof(int));
+        if (indexMap == NULL) {
+            vol2bird_err_printf("updateMap: failed to allocate indexMap (mapSize=%d)\n", mapSize);
+            RAVE_OBJECT_RELEASE(cellParam);
+            return nCellsValid;
+        }
+        for (int i = 0; i < mapSize; i++) indexMap[i] = -1;
+
+        // Build oldIdx -> newIdx mapping based on sorted cellProp order.
+        for (iCell = 0; iCell < nCells; iCell++) {
+            int oldIdx = cellProp[iCell].index;
+            int newIdx = (iCell < nCellsValid) ? (iCell + 2) : -1;
+            if (oldIdx >= 0 && oldIdx < mapSize) {
+                indexMap[oldIdx] = newIdx;
+            }
+            cellProp[iCell].index = newIdx;
         }
 
-        #ifdef FPRINTFON
-        vol2bird_err_printf("before: cellProp[%d].index = %d.\n",iCell,cellProp[iCell].index);
-        vol2bird_err_printf("before: cellProp[%d].nGates = %d.\n",iCell,cellProp[iCell].nGates);
-        vol2bird_err_printf("before: iCell = %d.\n",iCell);
-        vol2bird_err_printf("before: iCellNew = %d.\n",iCellNew);
-        vol2bird_err_printf("\n");
-        #endif
-
+        // Apply the mapping to cellImage.
         for (iGlobal = 0; iGlobal < nGlobal; iGlobal++) {
-            if (cellImage[iGlobal] == cellProp[iCell].index) {
-                cellImage[iGlobal] = iCellNew;
+            int v = cellImage[iGlobal];
+            if (v < 0 || v >= mapSize) {
+                cellImage[iGlobal] = -1;
+            } else {
+                cellImage[iGlobal] = indexMap[v];
             }
         }
-        // have the indices in cellProp match the re-numbering
-        cellProp[iCell].index = iCellNew;
 
-    } // (iCell = 0; iCell < nCells; iCell++)
-
-
-    // once you've re-numbered everything, flip the sign back and
-    // remove the offset of 100...
-    for (iGlobal = 0; iGlobal < nGlobal; iGlobal++) {
-        if (cellImage[iGlobal] == -1) {
-            // do nothing
-        }
-        else {
-            cellImage[iGlobal] = (-1 * cellImage[iGlobal]) - 100;
-        }
+        free(indexMap);
     }
-    // ...and make sure the indices in cellProp match that change
-    for (iCell = 0; iCell < nCells; iCell++) {
 
-        if (cellProp[iCell].index == -1) {
-            // do nothing
-        }
-        else {
-            cellProp[iCell].index = (-1 * cellProp[iCell].index) - 100;
-        }
-
-        #ifdef FPRINTFON
-        vol2bird_err_printf("after: cellProp[%d].index = %d.\n",iCell,cellProp[iCell].index);
-        vol2bird_err_printf("after: cellProp[%d].nGates = %d.\n",iCell,cellProp[iCell].nGates);
-        vol2bird_err_printf("\n");
-        #endif
-    }
     RAVE_OBJECT_RELEASE(cellParam);
     return nCellsValid;
 } // updateMap
