@@ -1579,6 +1579,8 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
         // in the azimuth dimension):
         iGlobalOther = findNearbyGateIndex(nAzim,nRang,iGlobal,3,3,1,&iAzimLocal,&iRangLocal);
         PolarScanParam_getValue(cellParam, iRangLocal, iAzimLocal, &cellValueOther);
+        // cellValueGlobal was last written by the loop above; re-read it for this gate
+        PolarScanParam_getValue(cellParam, iRang, iAzim, &cellValueGlobal);
 
         #ifdef FPRINTFON
         vol2bird_err_printf("iGlobal = %d, iGlobalOther = %d\n",iGlobal,iGlobalOther);
