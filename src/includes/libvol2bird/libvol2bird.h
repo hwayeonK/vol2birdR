@@ -133,8 +133,26 @@ struct vol2birdOptions {
     int dealiasRecycle;             /* whether we should dealias once, or separately for each profile type */
     int dualPol;                    /* whether to use dual-polarization moments for filtering meteorological echoes */
     int singlePol;                  /* whether to use single-polarization moments for filtering meteorological echoes */
+    int texCell;                    /* whether to use texture-based cell filtering */
     float dbzThresMin;              /* reflectivities above this threshold will be checked as potential precipitation */
     float rhohvThresMin;            /* correlation coefficients above this threshold will be removed as precipitation */
+    float texThresMax;              /* maximum vrad texture of a gate to be considered for a texture cell */
+    int texMask;                    /* whether to mask the texture field with reflectivity before texture cell detection */
+    float texMaskDbzMin;            /* reflectivity floor used by that mask */
+    int dbzMask;                    /* experiment (no PR): mask a copy of the reflectivity field by texture before S detection */
+    float dbzMaskTexMax;            /* experiment (no PR): texture ceiling used when masking reflectivity */
+
+    float rCellMaxOffset;           /* lab: extra range [m] beyond rangeMax that is read in for the cell search */
+    float cellTexMax;               /* lab: cell-level texture criterion for texture cells; 0 = off (area only) */
+    int ablKeepPrevCells;           /* lab: cells found by an earlier detection pass keep their labels and drop status */
+    int ablPassRule;                /* lab: each pass finalises its cells with its own drop rule */
+    int ablDenomVrad;               /* lab: keep vradTooLow gates in the denominator of the layer average */
+    int ablOptUf;                   /* lab: union-find cell merging (off = array scan, as upstream) */
+    int ablOptMap;                  /* lab: lookup-table renumber in updateMap (off = upstream renumber) */
+    int ablBorderFix;               /* lab: re-read the cell label at the azimuth border before merging */
+    int timing;                     /* lab: accumulate and report per-section timings */
+    int csvPrecision;               /* lab: write the CSV profile with 4 decimals instead of 2 */
+
     int resample;                   /* whether to resample the input polar volume */
     float resampleRscale;           /* resampled range gate length in m */
     int resampleNbins;              /* resampled number of range bins */
@@ -319,7 +337,7 @@ typedef struct vol2birdProfiles vol2birdProfiles_t;
 // ------------------------------------------------------------- //
 
 struct vol2birdMisc {
-    // rCellMax is defined as rangeMax + 5000.0f  in order to avoid
+    // rCellMax is defined as rangeMax + the RCELLMAX_OFFSET option in order to avoid
     // edge effects when calculating the fringe
     float rCellMax;
     // the number of dimensions to describe the location of an echo

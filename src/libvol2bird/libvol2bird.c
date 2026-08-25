@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <math.h>
+#include <time.h>
 #include <unistd.h>
 #include <vertical_profile.h>
 #include "rave_io.h"
@@ -55,11 +56,23 @@
 
 // non-public function prototypes (local to this file/translation unit)
 
-static int analyzeCells(PolarScan_t *scan, vol2birdScanUse_t scanUse, const int nCells, int dualpol, vol2bird_t *alldata);
+// drop criteria of a cell detection pass
+typedef enum {
+    DROP_SINGLE,   // dbz-detected cells
+    DROP_DUAL,     // rhohv-detected cells
+    DROP_TEX       // vrad texture-detected cells
+} dropRule_t;
+
+// cells below iCellKeep (detected and kept by earlier pass) -> skip
+static int analyzeCells(PolarScan_t *scan, vol2birdScanUse_t scanUse, const int nCells, dropRule_t dropRule, int iCellKeep, vol2bird_t *alldata);
 
 static float calcDist(const int range1, const int azim1, const int range2, const int azim2, const float rscale, const float ascale);
 
 static void calcTexture(PolarScan_t *scan, vol2birdScanUse_t scanUse, vol2bird_t* alldata);
+
+static void maskTexture(PolarScan_t *scan, vol2birdScanUse_t scanUse, const char *texMaskName, vol2bird_t* alldata);
+
+static void maskDbz(PolarScan_t *scan, vol2birdScanUse_t scanUse, const char *dbzMaskName, vol2bird_t* alldata);
 
 static void classifyGatesSimple(vol2bird_t* alldata);
 
@@ -135,11 +148,14 @@ static void printProfile(vol2bird_t* alldata);
 
 static int removeDroppedCells(CELLPROP *cellProp, const int nCells);
 
-static int selectCellsToDrop(CELLPROP *cellProp, int nCells, int dualpol, vol2bird_t* alldata);
+// cells below iCellKeep are from an earlier pass; the rules below keep their drop status
+static void selectCellsToDrop(CELLPROP *cellProp, int nCells, dropRule_t dropRule, int iCellKeep, vol2bird_t* alldata);
 
-static int selectCellsToDrop_singlePol(CELLPROP *cellProp, int nCells, vol2bird_t* alldata);
+static void selectCellsToDrop_singlePol(CELLPROP *cellProp, int iCell, vol2bird_t* alldata);
 
-static int selectCellsToDrop_dualPol(CELLPROP *cellProp, int nCells, vol2bird_t* alldata);
+static void selectCellsToDrop_dualPol(CELLPROP *cellProp, int iCell, vol2bird_t* alldata);
+
+static void selectCellsToDrop_texCell(CELLPROP *cellProp, int iCell, vol2bird_t* alldata);
 
 static void sortCellsByArea(CELLPROP *cellProp, const int nCells);
 
@@ -157,6 +173,52 @@ PolarVolume_t* vol2birdGetODIMVolume(char* filenames[], int nInputFiles);
 #ifdef VOL2BIRD_R
 int check_mistnet_loaded_c(void);
 #endif
+
+// lab: mirror of options.csvPrecision, because write_line_vpts_profile()
+// is a public function without access to alldata
+static int labCsvPrecision = FALSE;
+
+// lab: per-section timing (TIMING option). Accumulated across all scans and
+// reported once, to stderr, at teardown. Sections nest: SCAN/BORDER/RESOLVE are
+// parts of FIND, and UPDATEMAP is part of ANALYZE.
+typedef enum {
+    LAB_T_TOTAL = 0, LAB_T_FIND, LAB_T_SCAN, LAB_T_BORDER, LAB_T_RESOLVE,
+    LAB_T_ANALYZE, LAB_T_UPDATEMAP, LAB_T_N
+} labTimerId;
+
+static const char* labTimerName[LAB_T_N] = {
+    "total (setup..teardown)", "findWeatherCells", "  labelling loop",
+    "  border merge", "  union-find resolve", "analyzeCells", "  updateMap"
+};
+static double labTimerAcc[LAB_T_N];
+static long   labTimerCnt[LAB_T_N];
+static int    labTiming = FALSE;
+static double labTimerT0 = 0.0;   // set when vol2birdSetUp starts
+
+static double labNow(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double) ts.tv_sec * 1000.0 + (double) ts.tv_nsec / 1.0e6;
+}
+
+static void labTimerAdd(labTimerId id, double tStart) {
+    if (!labTiming) return;
+    labTimerAcc[id] += labNow() - tStart;
+    labTimerCnt[id] += 1;
+}
+
+static void labTimerReport(void) {
+    if (!labTiming) return;
+    labTimerAcc[LAB_T_TOTAL] = labNow() - labTimerT0;
+    labTimerCnt[LAB_T_TOTAL] = 1;
+    double total = labTimerAcc[LAB_T_TOTAL];
+    vol2bird_err_printf("[TIMING] %-24s %8s %12s %8s\n", "section", "calls", "ms", "%total");
+    for (int i = 0; i < LAB_T_N; i++) {
+        vol2bird_err_printf("[TIMING] %-24s %8ld %12.3f %7.1f%%\n",
+            labTimerName[i], labTimerCnt[i], labTimerAcc[i],
+            total > 0.0 ? 100.0 * labTimerAcc[i] / total : 0.0);
+    }
+}
 
 static vol2bird_printfun vol2bird_internal_printf_fun = vol2bird_default_print;
 
@@ -222,7 +284,7 @@ void vol2bird_set_err_printf(vol2bird_printfun fun)
   }
 }
 
-static int analyzeCells(PolarScan_t *scan, vol2birdScanUse_t scanUse, const int nCells, int dualpol, vol2bird_t *alldata) {
+static int analyzeCells(PolarScan_t *scan, vol2birdScanUse_t scanUse, const int nCells, dropRule_t dropRule, int iCellKeep, vol2bird_t *alldata) {
 
     // ----------------------------------------------------------------------------------- //
     //  This function analyzes the cellImage array found by the 'findWeatherCells'         //
@@ -257,10 +319,12 @@ static int analyzeCells(PolarScan_t *scan, vol2birdScanUse_t scanUse, const int 
 
     cellProp = getCellProperties(scan, scanUse, nCells, alldata);
 
-    selectCellsToDrop(cellProp, nCells, dualpol, alldata);
+    selectCellsToDrop(cellProp, nCells, dropRule, iCellKeep, alldata);
 
     // sorting cell properties according to cell area. Drop small cells from map
+    double labTMap = labNow();
     nCellsValid = updateMap(scan, cellProp, nCells, alldata);
+    labTimerAdd(LAB_T_UPDATEMAP, labTMap);
 
     // printing of cell properties to stderr
     if (alldata->options.printCellProp == TRUE) {
@@ -463,6 +527,76 @@ done:
 } // calcTexture
 
 
+static void maskTexture(PolarScan_t *scan, vol2birdScanUse_t scanUse, const char *texMaskName, vol2bird_t* alldata) {
+
+    // --------------------------------------------------------------------------------------- //
+    // blank the texture of gates without valid reflectivity, or with reflectivity             //
+    // below TEXMASK_DBZMIN, so they cannot join a texture cell. the mask is applied           //
+    // to a copy, so the cell statistics read from the texture field stay untouched.           //
+    // --------------------------------------------------------------------------------------- //
+
+    PolarScanParam_t *texParam = PolarScan_getParameter(scan, texMaskName);
+    PolarScanParam_t *dbzParam = PolarScan_getParameter(scan, scanUse.dbzName);
+
+    if (texParam != NULL && dbzParam != NULL) {
+
+        double texNodata = PolarScanParam_getNodata(texParam);
+        int nAzim = (int) PolarScan_getNrays(scan);
+        int nRang = (int) PolarScan_getNbins(scan);
+
+        for (int iAzim = 0; iAzim < nAzim; iAzim++) {
+            for (int iRang = 0; iRang < nRang; iRang++) {
+
+                double dbzValue;
+                RaveValueType typeDbz = PolarScanParam_getConvertedValue(dbzParam, iRang, iAzim, &dbzValue);
+
+                if (typeDbz != RaveValueType_DATA || dbzValue < alldata->options.texMaskDbzMin) {
+                    PolarScanParam_setValue(texParam, iRang, iAzim, texNodata);
+                }
+            }
+        }
+    }
+
+    RAVE_OBJECT_RELEASE(texParam);
+    RAVE_OBJECT_RELEASE(dbzParam);
+
+} // maskTexture
+
+static void maskDbz(PolarScan_t *scan, vol2birdScanUse_t scanUse, const char *dbzMaskName, vol2bird_t* alldata) {
+
+    // --------------------------------------------------------------------------------------- //
+    // The mirror of maskTexture: set the reflectivity of gates whose vrad texture is missing   //
+    // or above dbzMaskTexMax to nodata, so that single-pol detection groups only low-texture   //
+    // gates into a cell. dbzMaskName tells which parameter to mask - always the copy made for  //
+    // S detection here, so the cell statistics read the untouched reflectivity field.          //
+    // --------------------------------------------------------------------------------------- //
+
+    PolarScanParam_t *dbzParam = PolarScan_getParameter(scan, dbzMaskName);
+    PolarScanParam_t *texParam = PolarScan_getParameter(scan, scanUse.texName);
+
+    if (dbzParam != NULL && texParam != NULL) {
+
+        double dbzNodata = PolarScanParam_getNodata(dbzParam);
+        int nAzim = (int) PolarScan_getNrays(scan);
+        int nRang = (int) PolarScan_getNbins(scan);
+
+        for (int iAzim = 0; iAzim < nAzim; iAzim++) {
+            for (int iRang = 0; iRang < nRang; iRang++) {
+
+                double texValue;
+                RaveValueType typeTex = PolarScanParam_getConvertedValue(texParam, iRang, iAzim, &texValue);
+
+                if (typeTex != RaveValueType_DATA || texValue > alldata->options.dbzMaskTexMax) {
+                    PolarScanParam_setValue(dbzParam, iRang, iAzim, dbzNodata);
+                }
+            }
+        }
+    }
+
+    RAVE_OBJECT_RELEASE(dbzParam);
+    RAVE_OBJECT_RELEASE(texParam);
+
+} // maskDbz
 
 static void classifyGatesSimple(vol2bird_t* alldata) {
 
@@ -561,8 +695,8 @@ static void constructPointsArray(PolarVolume_t* volume, vol2birdScanUse_t* scanU
                 if (!PolarScan_hasParameter(scan, CELLNAME)){
                     cellScanParam = PolarScan_newParam(scan, scanUse[iScan].cellName, RaveDataType_INT);
                 }
-                // only when dealing with normal (non-dual pol) data, generate a vrad texture field
-                if (alldata->options.singlePol){
+                // when dealing with normal (non-dual pol) data or using texCell, generate a vrad texture field
+                if ((alldata->options.singlePol || alldata->options.texCell) && !PolarScan_hasParameter(scan, scanUse[iScan].texName)) {
                     // ------------------------------------------------------------- //
                     //                      calculate vrad texture                   //
                     // ------------------------------------------------------------- //
@@ -572,40 +706,136 @@ static void constructPointsArray(PolarVolume_t* volume, vol2birdScanUse_t* scanU
                     calcTexture(scan, scanUse[iScan], alldata);
                 }
 
+                // T detection reads this masked copy; the texture field itself stays untouched
+                const char *texDetectName = scanUse[iScan].texName;
+
+                if (alldata->options.texMask && alldata->options.texCell) {
+
+                    PolarScanParam_t *texParam = PolarScan_getParameter(scan, scanUse[iScan].texName);
+                    if (texParam != NULL) {
+                        PolarScanParam_t *texMaskParam = RAVE_OBJECT_CLONE(texParam);
+                        if (texMaskParam != NULL) {
+                            PolarScanParam_setQuantity(texMaskParam, MASKEDTEXNAME);
+                            PolarScan_addParameter(scan, texMaskParam);
+                            texDetectName = MASKEDTEXNAME;
+                            maskTexture(scan, scanUse[iScan], texDetectName, alldata);
+                        }
+                        RAVE_OBJECT_RELEASE(texMaskParam);
+                    }
+                    RAVE_OBJECT_RELEASE(texParam);
+                }
+
+                // The mirror operation: mask a copy of the reflectivity field by texture and let
+                // only the single-pol detection read it, so that cells are homogeneous in texture
+                // from the start. Experiment only - unlike the other ablation switches, DBZMASK
+                // does not correspond to a proposed change and off is not "upstream behaviour".
+                // Result reported in #159: it improves the single-pol filter on its own, but makes
+                // it converge on the texture channel, so S+T loses its complementarity.
+                const char *dbzDetectName = scanUse[iScan].dbzName;
+
+                if (alldata->options.dbzMask && alldata->options.singlePol) {
+
+                    if (!PolarScan_hasParameter(scan, scanUse[iScan].texName)) {
+                        vol2bird_err_printf("Warning: DBZMASK requested but no texture field present, "
+                                            "leaving the reflectivity field unmasked\n");
+                    }
+                    else {
+                        PolarScanParam_t *dbzParam = PolarScan_getParameter(scan, scanUse[iScan].dbzName);
+                        if (dbzParam != NULL) {
+                            PolarScanParam_t *dbzMaskParam = RAVE_OBJECT_CLONE(dbzParam);
+                            if (dbzMaskParam != NULL) {
+                                PolarScanParam_setQuantity(dbzMaskParam, MASKEDDBZNAME);
+                                PolarScan_addParameter(scan, dbzMaskParam);
+                                dbzDetectName = MASKEDDBZNAME;
+                                maskDbz(scan, scanUse[iScan], dbzDetectName, alldata);
+                            }
+                            RAVE_OBJECT_RELEASE(dbzMaskParam);
+                        }
+                        RAVE_OBJECT_RELEASE(dbzParam);
+                    }
+                }
+
                 int nCells = -1;
 
                 // ------------------------------------------------------------- //
                 //        find (weather) cells in the reflectivity image         //
                 // ------------------------------------------------------------- //
 
-                if (alldata->options.dualPol && !alldata->options.useMistNet){
+                int nCellsFound = 0;
+                int iCellStart = 2;
+                int iCellKeep  = 0;   // no earlier pass yet
+                int initialize = TRUE;
 
-                    if (alldata->options.singlePol){
+                // lab: PASS_RULE off switches to the upstream structure - only the first of
+                // several passes finalises its cells, and a single rule is applied to all
+                // cells at the end. With PASS_RULE on every pass finalises its own cells.
+                int nPasses = (alldata->options.singlePol ? 1 : 0)
+                            + (alldata->options.dualPol ? 1 : 0)
+                            + (alldata->options.texCell ? 1 : 0);
+                int iPass = 0;
+                #define ABL_FINALISE_HERE (alldata->options.ablPassRule || (iPass == 1 && nPasses > 1))
 
-                        // first pass: single pol rain filtering
-                        nCells = findWeatherCells(scan,scanUse[iScan].dbzName,alldata->options.dbzThresMin,TRUE,2,TRUE,alldata);
-                        // first pass: single pol analysis of precipitation cells
-                        analyzeCells(scan, scanUse[iScan], nCells, FALSE, alldata);
-                        // second pass: dual pol precipitation filtering
-                        nCells = findWeatherCells(scan,scanUse[iScan].rhohvName,
-                                    alldata->options.rhohvThresMin,TRUE,nCells+1,FALSE,alldata);
-                    }
-                    else{
-                        nCells = findWeatherCells(scan,scanUse[iScan].rhohvName,
-                                    alldata->options.rhohvThresMin,TRUE,2,TRUE,alldata);
-                    }
+                if (alldata->options.useMistNet) {
 
-                }
-
-                if (!alldata->options.dualPol && !alldata->options.useMistNet){
-
-                    nCells = findWeatherCells(scan,scanUse[iScan].dbzName,alldata->options.dbzThresMin,TRUE,2,TRUE,alldata);
-
-                }
-
-                if (alldata->options.useMistNet){
                     nCells = 2;
+
+                } else {
+
+                    if (alldata->options.singlePol) {
+                        double labTFind = labNow();
+                        nCellsFound = findWeatherCells(scan, dbzDetectName,
+                                        alldata->options.dbzThresMin, TRUE, iCellStart, initialize, alldata);
+                        labTimerAdd(LAB_T_FIND, labTFind);
+                        iPass++;
+                        if (ABL_FINALISE_HERE) {
+                            double labTAnalyze = labNow();
+                            nCells = analyzeCells(scan, scanUse[iScan], nCellsFound, DROP_SINGLE, iCellKeep, alldata);
+                            labTimerAdd(LAB_T_ANALYZE, labTAnalyze);
+                        }
+                        iCellStart = nCellsFound + 1;
+                        iCellKeep  = nCellsFound + 1;
+                        initialize = FALSE;
+                    }
+
+                    if (alldata->options.dualPol) {
+                        double labTFind = labNow();
+                        nCellsFound = findWeatherCells(scan, scanUse[iScan].rhohvName,
+                                        alldata->options.rhohvThresMin, TRUE, iCellStart, initialize, alldata);
+                        labTimerAdd(LAB_T_FIND, labTFind);
+                        iPass++;
+                        if (ABL_FINALISE_HERE) {
+                            double labTAnalyze = labNow();
+                            nCells = analyzeCells(scan, scanUse[iScan], nCellsFound, DROP_DUAL, iCellKeep, alldata);
+                            labTimerAdd(LAB_T_ANALYZE, labTAnalyze);
+                        }
+                        iCellStart = nCellsFound + 1;
+                        iCellKeep  = nCellsFound + 1;
+                        initialize = FALSE;
+                    }
+
+                    if (alldata->options.texCell) {
+                        double labTFind = labNow();
+                        nCellsFound = findWeatherCells(scan, texDetectName,
+                                        alldata->options.texThresMax, FALSE, iCellStart, initialize, alldata);
+                        labTimerAdd(LAB_T_FIND, labTFind);
+                        iPass++;
+                        if (ABL_FINALISE_HERE) {
+                            double labTAnalyze = labNow();
+                            nCells = analyzeCells(scan, scanUse[iScan], nCellsFound, DROP_TEX, iCellKeep, alldata);
+                            labTimerAdd(LAB_T_ANALYZE, labTAnalyze);
+                        }
+                    }
+
+                    // lab: upstream finalises all cells once, at the end, with the rule
+                    // implied by dualPol
+                    if (!alldata->options.ablPassRule && nPasses > 0) {
+                        double labTAnalyzeLast = labNow();
+                        nCells = analyzeCells(scan, scanUse[iScan], nCellsFound,
+                                    alldata->options.dualPol ? DROP_DUAL : DROP_SINGLE, 0, alldata);
+                        labTimerAdd(LAB_T_ANALYZE, labTAnalyzeLast);
+                    }
                 }
+                #undef ABL_FINALISE_HERE
 
                 if (nCells<0){
                     vol2bird_err_printf("Error: findWeatherCells exited with errors\n");
@@ -617,13 +847,6 @@ static void constructPointsArray(PolarVolume_t* volume, vol2birdScanUse_t* scanU
 
                 if (alldata->options.printCellProp == TRUE) {
                     vol2bird_err_printf("(%d/%d): found %d cells.\n",iScan+1, nScans, nCells);
-                }
-
-                // ------------------------------------------------------------- //
-                //                      analyze cells                            //
-                // ------------------------------------------------------------- //
-                if (!alldata->options.useMistNet){
-                    nCells=analyzeCells(scan, scanUse[iScan], nCells, alldata->options.dualPol, alldata);
                 }
                 // ------------------------------------------------------------- //
                 //                     calculate fringe                          //
@@ -1307,6 +1530,58 @@ static void exportBirdProfileAsJSON(vol2bird_t *alldata) {
 
 
 
+// ------------------------------------------------------------- //
+//  Union-find used to merge cell labels: path halving in         //
+//  uf_find(), union by rank in uf_unite()                        //
+// ------------------------------------------------------------- //
+
+static int* uf_parent = NULL;
+static int* uf_rank   = NULL;
+
+static void uf_free(void) {
+    free(uf_parent);
+    free(uf_rank);
+    uf_parent = NULL;
+    uf_rank   = NULL;
+}
+
+static int uf_init(int n) {
+    uf_parent = (int*) malloc(n * sizeof(int));
+    uf_rank   = (int*) calloc(n, sizeof(int));
+    if (uf_parent == NULL || uf_rank == NULL) {
+        uf_free();
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        uf_parent[i] = i;
+    }
+    return 1;
+}
+
+static int uf_find(int x) {
+    while (uf_parent[x] != x) {
+        uf_parent[x] = uf_parent[uf_parent[x]];   // path halving
+        x = uf_parent[x];
+    }
+    return x;
+}
+
+static void uf_unite(int a, int b) {
+    int ra = uf_find(a);
+    int rb = uf_find(b);
+    if (ra == rb) return;
+    // union by rank
+    if (uf_rank[ra] < uf_rank[rb]) {
+        uf_parent[ra] = rb;
+    } else if (uf_rank[ra] > uf_rank[rb]) {
+        uf_parent[rb] = ra;
+    } else {
+        uf_parent[rb] = ra;
+        uf_rank[ra]++;
+    }
+}
+
+
 static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quantityThreshold,
         int selectAboveThreshold, int iCellStart, int initialize, vol2bird_t* alldata) {
 
@@ -1332,7 +1607,6 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
     float quantityThres;
 
     int iGlobal;
-    int iGlobalOther;
     int nGlobal;
     int iLocal;
 
@@ -1364,7 +1638,6 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
 
     int cellIdentifierGlobal;
     int cellIdentifierGlobalOther;
-    int iGlobalInner;
 
 
     #ifdef FPRINTFON
@@ -1426,6 +1699,17 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
     }
   }
 
+    // Initialize Union-Find for fast cell merging
+    if (alldata->options.ablOptUf) {
+        int ufMaxId = iCellStart + nGlobal + 1;
+        if (!uf_init(ufMaxId)) {
+            RAVE_OBJECT_RELEASE(scanParam);
+            RAVE_OBJECT_RELEASE(cellParam);
+            vol2bird_err_printf("Failed to allocate the union-find arrays in findWeatherCells\n");
+            return -1;
+        }
+    }
+
     // If threshold value is equal to missing value, produce a warning
     if (quantityThres == quantityMissing) {
         vol2bird_err_printf("Warning: in function findWeatherCells, quantityThres equals quantityMissing\n");
@@ -1441,6 +1725,7 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
     // to be added by function fringeCells
     iCellIdentifier = iCellStart;
 
+    double labTScan = labNow();
     for (iAzim = 0; iAzim < nAzim; iAzim++) {
         for (iRang = 0; iRang < nRang; iRang++) {
 
@@ -1471,6 +1756,10 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
             PolarScanParam_getValue(scanParam, iRang, iAzim, &quantityValueGlobal);
             PolarScanParam_getValue(cellParam, iRang, iAzim, &cellValueGlobal);
 
+            // with initialize=FALSE, skip gates already assigned by an earlier pass
+            if (!initialize && alldata->options.ablKeepPrevCells && (int) cellValueGlobal != cellImageInitialValue) {
+                continue;
+            }
 
             if (quantityValueGlobal == quantityMissing || quantityValueGlobal == quantityUndetect) {
 
@@ -1501,7 +1790,8 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
 
                 PolarScanParam_getValue(scanParam, iRangLocal, iAzimLocal, &quantityValueLocal);
 
-                if (quantityValueLocal > quantityThres) {
+                if ((selectAboveThreshold && quantityValueLocal > quantityThres) ||
+                    (!selectAboveThreshold && quantityValueLocal < quantityThres)) {
                     count++;
                 }
 
@@ -1533,6 +1823,11 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
                     continue;
                 }
 
+                // with initialize=FALSE, do not connect to earlier-pass cells (< iCellStart)
+                if (!initialize && alldata->options.ablKeepPrevCells && (int) cellValueLocal < iCellStart) {
+                    continue;
+                }
+
                 // if pixel still unassigned, assign same iCellIdentifier as connection
                 if ((int) cellValueGlobal == cellImageInitialValue) {
                     PolarScanParam_setValue(cellParam, iRang, iAzim, cellValueLocal);
@@ -1541,12 +1836,17 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
                 else {
                     // if connection found but pixel is already assigned a different iCellIdentifier:
                     if (cellValueGlobal != cellValueLocal) {
-                        // merging cells detected: replace all other occurences by value of connection:
-                        for (iGlobalOther = 0; iGlobalOther < nGlobal; iGlobalOther++) {
-                            if (cellParamData[iGlobalOther] == cellValueGlobal) {
-                                cellParamData[iGlobalOther] = cellValueLocal;
+                        if (alldata->options.ablOptUf) {
+                            // record the merge; labels are rewritten after the labelling loop
+                            uf_unite((int) cellValueGlobal, (int) cellValueLocal);
+                        }
+                        else {
+                            // upstream: relabel the whole array on every merge
+                            for (int iGlobalInner = 0; iGlobalInner < nGlobal; iGlobalInner++) {
+                                if (cellParamData[iGlobalInner] == (int) cellValueGlobal) {
+                                    cellParamData[iGlobalInner] = (int) cellValueLocal;
+                                }
                             }
-                            // note: not all iCellIdentifier need to be used eventually
                         }
                     }
                 }
@@ -1565,10 +1865,12 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
 
         } // (iRang=0; iRang<nRang; iRang++)
     } // for (iAzim=0; iAzim<nAzim; iAzim++)
+    labTimerAdd(LAB_T_SCAN, labTScan);
 
 
     // check whether a cell crosses the border of the array (remember that iAzim=0 is
     // adjacent to iAzim=nAzim-1):
+    double labTBorder = labNow();
     iAzim = 0;
 
     for (iRang = 0; iRang < nRang; iRang++) {
@@ -1577,30 +1879,65 @@ static int findWeatherCells(PolarScan_t *scan, const char* quantity, float quant
         // index 1 in a 3x3 child array refers to the cell that is a direct neighbor of
         // iGlobal, but on the other side of the array (because the polar plot is wrapped
         // in the azimuth dimension):
-        iGlobalOther = findNearbyGateIndex(nAzim,nRang,iGlobal,3,3,1,&iAzimLocal,&iRangLocal);
+        findNearbyGateIndex(nAzim,nRang,iGlobal,3,3,1,&iAzimLocal,&iRangLocal);
         PolarScanParam_getValue(cellParam, iRangLocal, iAzimLocal, &cellValueOther);
+        // cellValueGlobal was last written by the loop above; re-read it for this gate
+        if (alldata->options.ablBorderFix) {
+            PolarScanParam_getValue(cellParam, iRang, iAzim, &cellValueGlobal);
+        }
 
         #ifdef FPRINTFON
-        vol2bird_err_printf("iGlobal = %d, iGlobalOther = %d\n",iGlobal,iGlobalOther);
+        vol2bird_err_printf("iGlobal = %d, iGlobalOther = %d\n",iGlobal,iAzimLocal * nRang + iRangLocal);
         #endif
 
         cellIdentifierGlobal = cellValueGlobal;
         cellIdentifierGlobalOther = cellValueOther;
         if (cellIdentifierGlobal != cellImageInitialValue && cellIdentifierGlobalOther != cellImageInitialValue ) {
-            // adjacent gates, both part of a cell -> assign them the same identifier, i.e. assign
-            // all elements of cellImage that are equal to cellImage[iGlobalOther] the value of
-            // cellImage[iGlobal]
 
-            for (iGlobalInner = 0; iGlobalInner < nGlobal; iGlobalInner++) {
-                if (cellParamData[iGlobalInner] == cellIdentifierGlobalOther) {
-                    cellParamData[iGlobalInner] = cellIdentifierGlobal;
+            // skip if either cell is from an earlier pass
+            if (!initialize && alldata->options.ablKeepPrevCells && (cellIdentifierGlobal < iCellStart || cellIdentifierGlobalOther < iCellStart)) {
+                continue;
+            }
+
+            // adjacent gates, both part of a cell -> merge via Union-Find
+            if (alldata->options.ablOptUf) {
+                uf_unite(cellIdentifierGlobal, cellIdentifierGlobalOther);
+            }
+            else {
+                // upstream: relabel the whole array on every merge
+                for (int iGlobalInner = 0; iGlobalInner < nGlobal; iGlobalInner++) {
+                    if (cellParamData[iGlobalInner] == cellIdentifierGlobalOther) {
+                        cellParamData[iGlobalInner] = cellIdentifierGlobal;
+                    }
                 }
             }
         }
     }
 
+    labTimerAdd(LAB_T_BORDER, labTBorder);
+
+    // resolve all cell labels through Union-Find
+    // (with OPT_UF off the merges above already relabelled the array in place)
+    double labTResolve = labNow();
+    if (alldata->options.ablOptUf) {
+        for (iGlobal = 0; iGlobal < nGlobal; iGlobal++) {
+            if (cellParamData[iGlobal] != cellImageInitialValue) {
+                // preserve previous-pass cells when initialize=FALSE
+                if (!initialize && alldata->options.ablKeepPrevCells && cellParamData[iGlobal] < iCellStart) {
+                    continue;
+                }
+                cellParamData[iGlobal] = uf_find(cellParamData[iGlobal]);
+            }
+        }
+    }
+
+    labTimerAdd(LAB_T_RESOLVE, labTResolve);
+
     // Returning number of detected cells (including fringe/clutter)
     nCells = iCellIdentifier;
+    if (alldata->options.ablOptUf) {
+        uf_free();
+    }
 
     RAVE_OBJECT_RELEASE(scanParam);
     RAVE_OBJECT_RELEASE(cellParam);
@@ -2918,8 +3255,15 @@ static int readUserConfigOptions(cfg_t** cfg, const char * optsConfFilename) {
         CFG_BOOL("EXPORT_BIRD_PROFILE_AS_JSON",FALSE,CFGF_NONE),
         CFG_BOOL("DUALPOL",DUALPOL,CFGF_NONE),
         CFG_BOOL("SINGLEPOL",SINGLEPOL,CFGF_NONE),
+        CFG_BOOL("TEXCELL",TEXCELL,CFGF_NONE),
         CFG_FLOAT("DBZMIN",DBZMIN,CFGF_NONE),
         CFG_FLOAT("RHOHVMIN",RHOHVMIN,CFGF_NONE),
+        CFG_FLOAT("TEXMAX",TEXMAX,CFGF_NONE),
+        CFG_BOOL("TEXMASK",TEXMASK,CFGF_NONE),
+        CFG_FLOAT("TEXMASK_DBZMIN",TEXMASK_DBZMIN,CFGF_NONE),
+        // DBZMASK is NOT one of the proposed changes - see the note in constants.h
+        CFG_BOOL("DBZMASK",DBZMASK,CFGF_NONE),
+        CFG_FLOAT("DBZMASK_TEXMAX",DBZMASK_TEXMAX,CFGF_NONE),
         CFG_BOOL("RESAMPLE",RESAMPLE,CFGF_NONE),
         CFG_FLOAT("RESAMPLE_RSCALE",RESAMPLE_RSCALE,CFGF_NONE),
         CFG_INT("RESAMPLE_NBINS",RESAMPLE_NBINS,CFGF_NONE),
@@ -2930,6 +3274,21 @@ static int readUserConfigOptions(cfg_t** cfg, const char * optsConfFilename) {
         CFG_STR("MISTNET_PATH",MISTNET_PATH,CFGF_NONE),
         CFG_INT("HEIGHT_REFERENCE",HEIGHT_REFERENCE,CFGF_NONE),
         CFG_STR("GROUND_HEIGHT_PARAM",GROUND_HEIGHT_PARAM,CFGF_NONE),
+        // lab: upstream constant exposed as an option (upstream value is the default)
+        CFG_FLOAT("RCELLMAX_OFFSET",RCELLMAX_OFFSET,CFGF_NONE),
+        // lab: optional cell-level texture threshold (default in constants.h)
+        CFG_FLOAT("CELLTEXMAX",CELLTEXMAX,CFGF_NONE),
+        // lab: ablation switches. All default to the behaviour of the shared version,
+        // so an unmodified options.conf reproduces it exactly.
+        CFG_BOOL("KEEP_PREV_CELLS",KEEP_PREV_CELLS,CFGF_NONE),
+        CFG_BOOL("PASS_RULE",PASS_RULE,CFGF_NONE),
+        CFG_BOOL("DENOM_VRAD",DENOM_VRAD,CFGF_NONE),
+        CFG_BOOL("OPT_UF",OPT_UF,CFGF_NONE),
+        CFG_BOOL("OPT_MAP",OPT_MAP,CFGF_NONE),
+        CFG_BOOL("BORDER_FIX",BORDER_FIX,CFGF_NONE),
+        // lab: local input/output conventions. off on default.
+        CFG_BOOL("TIMING",TIMING,CFGF_NONE),
+        CFG_BOOL("CSV_PRECISION",CSV_PRECISION,CFGF_NONE),
         CFG_END()
     };
 
@@ -3225,16 +3584,17 @@ void write_line_vpts_profile(char* printbuffer, int buflen,
   memset(printbuffer, 0, sizeof(char)*buflen);
 
   snprintf(s_HGHT, sizeof(s_HGHT), "%4.f", HGHT);
-  nanify_vpts(s_u, "%6.2f", u);
-  nanify_vpts(s_v, "%6.2f", v);
-  nanify_vpts(s_w, "%7.2f", w);
-  nanify_vpts(s_ff, "%5.2f", ff);
-  nanify_vpts(s_dd, "%5.1f", dd);
-  nanify_vpts(s_sd_vvp, "%5.2f", sd_vvp);
-  nanify_vpts(s_dbz, "%6.2f", dbz);
-  nanify_vpts(s_eta, "%6.1f", eta);
-  nanify_vpts(s_dens, "%6.2f", dens);
-  nanify_vpts(s_DBZH, "%6.2f", DBZH);
+  // lab: CSV_PRECISION switches to 4 decimals, to match the HDF5/R outputs
+  nanify_vpts(s_u, labCsvPrecision ? "%6.4f" : "%6.2f", u);
+  nanify_vpts(s_v, labCsvPrecision ? "%6.4f" : "%6.2f", v);
+  nanify_vpts(s_w, labCsvPrecision ? "%7.4f" : "%7.2f", w);
+  nanify_vpts(s_ff, labCsvPrecision ? "%5.4f" : "%5.2f", ff);
+  nanify_vpts(s_dd, labCsvPrecision ? "%5.4f" : "%5.1f", dd);
+  nanify_vpts(s_sd_vvp, labCsvPrecision ? "%5.4f" : "%5.2f", sd_vvp);
+  nanify_vpts(s_dbz, labCsvPrecision ? "%6.4f" : "%6.2f", dbz);
+  nanify_vpts(s_eta, labCsvPrecision ? "%6.4f" : "%6.1f", eta);
+  nanify_vpts(s_dens, labCsvPrecision ? "%6.4f" : "%6.2f", dens);
+  nanify_vpts(s_DBZH, labCsvPrecision ? "%6.4f" : "%6.2f", DBZH);
   nanify_vpts(s_n, "%5.f", n);
   nanify_vpts(s_n_dbz, "%5.f", n_dbz);
   nanify_vpts(s_n_all, "%5.f", n_all);
@@ -3704,85 +4064,105 @@ static int printMeta(PolarScan_t* scan, const char* quantity) {
 
 
 
-static int selectCellsToDrop(CELLPROP *cellProp, int nCells, int dualpol, vol2bird_t* alldata){
-    int output = 0;
-    if(dualpol){
-        output = selectCellsToDrop_dualPol(cellProp, nCells, alldata);
-    }
-    else{
-        output = selectCellsToDrop_singlePol(cellProp, nCells, alldata);
-    }
-    return output;
-}
+static void selectCellsToDrop(CELLPROP *cellProp, int nCells, dropRule_t dropRule, int iCellKeep, vol2bird_t* alldata){
 
-
-
-static int selectCellsToDrop_singlePol(CELLPROP *cellProp, int nCells, vol2bird_t* alldata){
-    // determine which blobs to drop from map based on low mean dBZ / high stdev /
-    // small area / high percentage clutter
     for (int iCell = 0; iCell < nCells; iCell++) {
-        int notEnoughGates = cellProp[iCell].area < alldata->constants.areaCellMin;
-        int dbzTooLow = cellProp[iCell].dbzAvg < alldata->misc.cellDbzMin;
-        int texTooHigh = cellProp[iCell].texAvg > alldata->options.cellStdDevMax;
-        int tooMuchClutter = ((float) cellProp[iCell].nGatesClutter / cellProp[iCell].nGates) > alldata->constants.cellClutterFractionMax;
 
-        if (notEnoughGates) {
-
-            // this blob is too small too be a weather cell, more likely
-            // that these are birds. So, drop the blob from the record of
-            // weather cells
-
-            cellProp[iCell].drop = TRUE;
-
+        if (iCellKeep > 0 && cellProp[iCell].index < iCellKeep) {
             continue;
         }
 
-        if (dbzTooLow && texTooHigh) {
-
-            // apparently, we are dealing a blob that is fairly large (it
-            // passes the 'notEnoughGates' condition above, but it has both
-            // a low dbz and a high vrad texture. In contrast, weather cells
-            // have high dbz and low vrad texture. It is therefore unlikely
-            // that the blob is a weather cell.
-
-            if (tooMuchClutter) {
-                // pass
-            }
-            else {
-
-                // So at this point we have established that we are
-                // dealing with a blob that is:
-                //     1. fairly large
-                //     2. has too low dbz to be precipitation
-                //     3. has too high vrad texture to be precipitation
-                //     4. has too little clutter to be attributed to clutter
-                // Therefore we drop it from the record of known weather cells
-
-                cellProp[iCell].drop = TRUE;
-
-            }
+        if (dropRule == DROP_TEX) {
+            selectCellsToDrop_texCell(cellProp, iCell, alldata);
+        }
+        else if (dropRule == DROP_DUAL) {
+            selectCellsToDrop_dualPol(cellProp, iCell, alldata);
+        }
+        else {
+            selectCellsToDrop_singlePol(cellProp, iCell, alldata);
         }
     }
-    return 1;
 }
 
 
-static int selectCellsToDrop_dualPol(CELLPROP *cellProp, int nCells, vol2bird_t* alldata){
-    // determine which blobs to drop from map based on small area
-    for (int iCell = 0; iCell < nCells; iCell++) {
-        int notEnoughGates = cellProp[iCell].area < alldata->constants.areaCellMin;
+static void selectCellsToDrop_singlePol(CELLPROP *cellProp, int iCell, vol2bird_t* alldata){
+    // determine whether to drop this blob from the map based on low mean dBZ /
+    // high stdev / small area / high percentage clutter
+    int notEnoughGates = cellProp[iCell].area < alldata->constants.areaCellMin;
+    int dbzTooLow = cellProp[iCell].dbzAvg < alldata->misc.cellDbzMin;
+    int texTooHigh = cellProp[iCell].texAvg > alldata->options.cellStdDevMax;
+    int tooMuchClutter = ((float) cellProp[iCell].nGatesClutter / cellProp[iCell].nGates) > alldata->constants.cellClutterFractionMax;
 
-        if (notEnoughGates) {
+    if (notEnoughGates) {
 
-            // this blob is too small too be a weather cell, more likely
-            // that these are birds. So, drop the blob from the record of
-            // weather cells
+        // this blob is too small too be a weather cell, more likely
+        // that these are birds. So, drop the blob from the record of
+        // weather cells
+
+        cellProp[iCell].drop = TRUE;
+
+        return;
+    }
+
+    if (dbzTooLow && texTooHigh) {
+
+        // apparently, we are dealing a blob that is fairly large (it
+        // passes the 'notEnoughGates' condition above, but it has both
+        // a low dbz and a high vrad texture. In contrast, weather cells
+        // have high dbz and low vrad texture. It is therefore unlikely
+        // that the blob is a weather cell.
+
+        if (tooMuchClutter) {
+            // pass
+        }
+        else {
+
+            // So at this point we have established that we are
+            // dealing with a blob that is:
+            //     1. fairly large
+            //     2. has too low dbz to be precipitation
+            //     3. has too high vrad texture to be precipitation
+            //     4. has too little clutter to be attributed to clutter
+            // Therefore we drop it from the record of known weather cells
 
             cellProp[iCell].drop = TRUE;
-            continue;
+
         }
     }
-    return 1;
+}
+
+
+static void selectCellsToDrop_dualPol(CELLPROP *cellProp, int iCell, vol2bird_t* alldata){
+    // determine whether to drop this blob from the map based on small area
+    int notEnoughGates = cellProp[iCell].area < alldata->constants.areaCellMin;
+
+    if (notEnoughGates) {
+
+        // this blob is too small too be a weather cell, more likely
+        // that these are birds. So, drop the blob from the record of
+        // weather cells
+
+        cellProp[iCell].drop = TRUE;
+    }
+}
+
+
+// drop rule for texture-detected cells. Area only, as for rhohv-detected cells
+static void selectCellsToDrop_texCell(CELLPROP *cellProp, int iCell, vol2bird_t* alldata){
+
+    int notEnoughGates = cellProp[iCell].area < alldata->constants.areaCellMin;
+
+    // lab: optional cell-level texture criterion (CELLTEXMAX), unset by default.
+    // Detection already collects gates with texture <= TEXMAX, so cell averages sit
+    // below that too: a CELLTEXMAX above TEXMAX can never fire.
+    int texTooHigh = (alldata->options.cellTexMax > 0)
+                     && (cellProp[iCell].texAvg > alldata->options.cellTexMax);
+
+    if (notEnoughGates || texTooHigh) {
+
+        cellProp[iCell].drop = TRUE;
+
+    }
 }
 
 
@@ -3966,7 +4346,6 @@ static int updateMap(PolarScan_t* scan, CELLPROP *cellProp, const int nCells, vo
 
     int iGlobal;
     int iCell;
-    int iCellNew;
     int nCellsValid;
     int cellImageValue;
 
@@ -4029,61 +4408,65 @@ static int updateMap(PolarScan_t* scan, CELLPROP *cellProp, const int nCells, vo
     vol2bird_err_printf("\n");
     #endif
 
-    // replace the values in cellImage with newly calculated index values:
-    for (iCell = 0; iCell < nCells; iCell++) {
-
-        if (iCell < nCellsValid) {
-            iCellNew = -1 * (iCell + 2 + 100);
+    // renumber through a lookup table indexed by the old cellImage value:
+    // O(nCells + nGlobal) instead of a nested O(nCells x nGlobal) loop
+    if (!alldata->options.ablOptMap) {
+        // upstream: two passes over cellImage per cell, using a negative offset to
+        // keep already-renumbered gates apart from the old numbering
+        int iCellNew;
+        for (iCell = 0; iCell < nCells; iCell++) {
+            if (iCell < nCellsValid) { iCellNew = -1 * (iCell + 2 + 100); }
+            else { iCellNew = -1; }
+            for (iGlobal = 0; iGlobal < nGlobal; iGlobal++) {
+                if (cellImage[iGlobal] == cellProp[iCell].index) { cellImage[iGlobal] = iCellNew; }
+            }
+            cellProp[iCell].index = iCellNew;
         }
-        else {
-            iCellNew = -1;
-        }
-
-        #ifdef FPRINTFON
-        vol2bird_err_printf("before: cellProp[%d].index = %d.\n",iCell,cellProp[iCell].index);
-        vol2bird_err_printf("before: cellProp[%d].nGates = %d.\n",iCell,cellProp[iCell].nGates);
-        vol2bird_err_printf("before: iCell = %d.\n",iCell);
-        vol2bird_err_printf("before: iCellNew = %d.\n",iCellNew);
-        vol2bird_err_printf("\n");
-        #endif
-
         for (iGlobal = 0; iGlobal < nGlobal; iGlobal++) {
-            if (cellImage[iGlobal] == cellProp[iCell].index) {
-                cellImage[iGlobal] = iCellNew;
+            if (cellImage[iGlobal] != -1) { cellImage[iGlobal] = (-1 * cellImage[iGlobal]) - 100; }
+        }
+        for (iCell = 0; iCell < nCells; iCell++) {
+            if (cellProp[iCell].index != -1) { cellProp[iCell].index = (-1 * cellProp[iCell].index) - 100; }
+        }
+    }
+    else {
+        // Determine maximum old index to size the lookup table.
+        int maxOldIdx = 0;
+        for (int i = 0; i < nCells; i++) {
+            if (cellProp[i].index > maxOldIdx) maxOldIdx = cellProp[i].index;
+        }
+        int mapSize = maxOldIdx + 1;
+        int *indexMap = malloc(mapSize * sizeof(int));
+        if (indexMap == NULL) {
+            vol2bird_err_printf("updateMap: failed to allocate indexMap (mapSize=%d)\n", mapSize);
+            RAVE_OBJECT_RELEASE(cellParam);
+            return nCellsValid;
+        }
+        for (int i = 0; i < mapSize; i++) indexMap[i] = -1;
+
+        // Build oldIdx -> newIdx mapping based on sorted cellProp order.
+        for (iCell = 0; iCell < nCells; iCell++) {
+            int oldIdx = cellProp[iCell].index;
+            int newIdx = (iCell < nCellsValid) ? (iCell + 2) : -1;
+            if (oldIdx >= 0 && oldIdx < mapSize) {
+                indexMap[oldIdx] = newIdx;
+            }
+            cellProp[iCell].index = newIdx;
+        }
+
+        // Apply the mapping to cellImage.
+        for (iGlobal = 0; iGlobal < nGlobal; iGlobal++) {
+            int v = cellImage[iGlobal];
+            if (v < 0 || v >= mapSize) {
+                cellImage[iGlobal] = -1;
+            } else {
+                cellImage[iGlobal] = indexMap[v];
             }
         }
-        // have the indices in cellProp match the re-numbering
-        cellProp[iCell].index = iCellNew;
 
-    } // (iCell = 0; iCell < nCells; iCell++)
-
-
-    // once you've re-numbered everything, flip the sign back and
-    // remove the offset of 100...
-    for (iGlobal = 0; iGlobal < nGlobal; iGlobal++) {
-        if (cellImage[iGlobal] == -1) {
-            // do nothing
-        }
-        else {
-            cellImage[iGlobal] = (-1 * cellImage[iGlobal]) - 100;
-        }
+        free(indexMap);
     }
-    // ...and make sure the indices in cellProp match that change
-    for (iCell = 0; iCell < nCells; iCell++) {
 
-        if (cellProp[iCell].index == -1) {
-            // do nothing
-        }
-        else {
-            cellProp[iCell].index = (-1 * cellProp[iCell].index) - 100;
-        }
-
-        #ifdef FPRINTFON
-        vol2bird_err_printf("after: cellProp[%d].index = %d.\n",iCell,cellProp[iCell].index);
-        vol2bird_err_printf("after: cellProp[%d].nGates = %d.\n",iCell,cellProp[iCell].nGates);
-        vol2bird_err_printf("\n");
-        #endif
-    }
     RAVE_OBJECT_RELEASE(cellParam);
     return nCellsValid;
 } // updateMap
@@ -4168,6 +4551,7 @@ void vol2birdCalcProfiles(vol2bird_t *alldata) {
         int iPointIncludedZ;
         int nPointsIncluded;
         int nPointsIncludedZ;
+        int nPointsDenominator;
 
         float parameterVector[] = { NAN, NAN, NAN };
         float avar[] = { NAN, NAN, NAN };
@@ -4221,6 +4605,7 @@ void vol2birdCalcProfiles(vol2bird_t *alldata) {
 
         //Calculate the average reflectivity Z of the layer
         iPointIncludedZ = 0;
+        nPointsDenominator = 0;
         for (iPointLayer = iPointFrom; iPointLayer < iPointFrom + nPointsLayer; iPointLayer++) {
 
           unsigned int gateCode = (unsigned int) alldata->points.points[iPointLayer * alldata->points.nColsPoints + alldata->points.gateCodeCol];
@@ -4241,13 +4626,22 @@ void vol2birdCalcProfiles(vol2bird_t *alldata) {
             iPointIncludedZ += 1;
 
           }
+
+          // nPointsDenominator = nPointsIncludedZ + the gates rejected only for vradTooLow
+          if (includeGate(iProfileType, 0, gateCode & ~(1 << alldata->flags.flagPositionVradTooLow), alldata) == TRUE) {
+            nPointsDenominator += 1;
+          }
         } // endfor (iPointLayer = 0; iPointLayer < nPointsLayer; iPointLayer++) {
         nPointsIncludedZ = iPointIncludedZ;
 
         // calculate bird densities from undbzSum
-        if (nPointsIncludedZ > alldata->constants.nPointsIncludedMin) {
+        // nPointsDenominator is used both as the denominator and for the "enough points" test
+        // n_dbz (profile column 13) and the hasGap test below still use nPointsIncludedZ.
+        // lab: with DENOM_VRAD off, fall back to the upstream denominator (numerator gates only)
+        int nDenominatorUsed = alldata->options.ablDenomVrad ? nPointsDenominator : nPointsIncludedZ;
+        if (nDenominatorUsed > alldata->constants.nPointsIncludedMin) {
           // when there are enough valid points, convert undbzAvg back to dB-scale
-          undbzAvg = (float) (undbzSum / nPointsIncludedZ);
+          undbzAvg = (float) (undbzSum / nDenominatorUsed);
           dbzAvg = (10 * log(undbzAvg)) / log(10);
         } else {
           undbzAvg = UNDETECT;
@@ -5099,6 +5493,22 @@ int vol2birdLoadConfig(vol2bird_t* alldata, const char* optionsFile) {
     alldata->options.mistNetElevsOnly = cfg_getbool(*cfg, "MISTNET_ELEVS_ONLY");
     alldata->options.useMistNet = cfg_getbool(*cfg, "USE_MISTNET");
     strcpy(alldata->options.mistNetPath,cfg_getstr(*cfg,"MISTNET_PATH"));
+    alldata->options.texCell = cfg_getbool(*cfg,"TEXCELL");
+    alldata->options.texThresMax = cfg_getfloat(*cfg,"TEXMAX");
+    alldata->options.texMask = cfg_getbool(*cfg,"TEXMASK");
+    alldata->options.texMaskDbzMin = cfg_getfloat(*cfg,"TEXMASK_DBZMIN");
+    alldata->options.dbzMask       = cfg_getbool(*cfg,"DBZMASK");
+    alldata->options.dbzMaskTexMax = cfg_getfloat(*cfg,"DBZMASK_TEXMAX");
+    alldata->options.rCellMaxOffset = cfg_getfloat(*cfg,"RCELLMAX_OFFSET");
+    alldata->options.cellTexMax = cfg_getfloat(*cfg,"CELLTEXMAX");
+    alldata->options.ablKeepPrevCells  = cfg_getbool(*cfg,"KEEP_PREV_CELLS");
+    alldata->options.ablPassRule  = cfg_getbool(*cfg,"PASS_RULE");
+    alldata->options.ablDenomVrad = cfg_getbool(*cfg,"DENOM_VRAD");
+    alldata->options.ablOptUf     = cfg_getbool(*cfg,"OPT_UF");
+    alldata->options.ablOptMap    = cfg_getbool(*cfg,"OPT_MAP");
+    alldata->options.ablBorderFix = cfg_getbool(*cfg,"BORDER_FIX");
+    alldata->options.timing = cfg_getbool(*cfg,"TIMING");
+    alldata->options.csvPrecision = cfg_getbool(*cfg,"CSV_PRECISION");
 
 
     // ------------------------------------------------------------- //
@@ -5124,7 +5534,7 @@ int vol2birdLoadConfig(vol2bird_t* alldata, const char* optionsFile) {
     //       some other variables, derived from user options         //
     // ------------------------------------------------------------- //
 
-    alldata->misc.rCellMax = alldata->options.rangeMax + RCELLMAX_OFFSET;
+    alldata->misc.rCellMax = alldata->options.rangeMax + alldata->options.rCellMaxOffset;
     alldata->misc.nDims = 2;
     alldata->misc.nParsFitted = 3;
 
@@ -5174,6 +5584,8 @@ int get_radar_name(const char* source, char* radarName, size_t radarNameLength) 
 //int vol2birdSetUp(PolarVolume_t* volume, cfg_t** cfg, vol2bird_t* alldata) {
 int vol2birdSetUp(PolarVolume_t* volume, vol2bird_t* alldata) {
 
+    labTimerT0 = labNow();   // lab: start of the TIMING total
+
     alldata->misc.initializationSuccessful = FALSE;
 
     alldata->misc.vol2birdSuccessful = TRUE;
@@ -5184,6 +5596,13 @@ int vol2birdSetUp(PolarVolume_t* volume, vol2bird_t* alldata) {
         vol2bird_err_printf("Vol2bird configuration not loaded. Run vol2birdLoadConfig prior to vol2birdSetup\n");
         return -1;
     }
+
+    // lab: mirror the flags that file-scope helpers read. This has to sit here rather
+    // than in vol2birdLoadConfig, because the R front end fills the options struct
+    // directly and never calls that function (vol2birdR builds with -DNOCONFUSE).
+    // write_line_vpts_profile() has no access to alldata, so mirror the flag here
+    labCsvPrecision = alldata->options.csvPrecision;
+    labTiming = alldata->options.timing;
 
     int radar_name_result = get_radar_name(PolarVolume_getSource(volume), alldata->misc.radarName, sizeof(alldata->misc.radarName));
     if (radar_name_result != 0) {
@@ -5346,16 +5765,19 @@ int vol2birdSetUp(PolarVolume_t* volume, vol2bird_t* alldata) {
     }
 
     // Print warning missing rain specification
-    if(!alldata->options.singlePol && !alldata->options.dualPol){
-        vol2bird_err_printf("Warning: neither single- nor dual-polarization precipitation filter selected by user, continuing in SINGLE polarization mode\n");
+    if(!alldata->options.singlePol && !alldata->options.dualPol && !alldata->options.texCell){
+        vol2bird_err_printf("Warning: none of SINGLEPOL, DUALPOL, TEXCELL filter selected by user, continuing in SINGLE polarization mode\n");
     alldata->options.singlePol = TRUE;
     }
 
     // Disable single pol rain filtering for S-band data when dual-pol moments are available
-    if(alldata->options.radarWavelength > 7.5 && alldata->options.singlePol && alldata->options.dualPol){
-        vol2bird_err_printf("Warning: disabling single-polarization precipitation filter for S-band data, continuing in DUAL polarization mode\n");
-    alldata->options.singlePol = FALSE;
-    }
+    // Commented out in this ablation build only: a run has to use exactly the filters it was
+    // asked for, and switching single-pol off here makes S-band combinations impossible to
+    // compare. Restored on the branches meant for upstream.
+    // if(alldata->options.radarWavelength > 7.5 && alldata->options.singlePol && alldata->options.dualPol){
+    //     vol2bird_err_printf("Warning: disabling single-polarization precipitation filter for S-band data, continuing in DUAL polarization mode\n");
+    //     alldata->options.singlePol = FALSE;
+    // }
 
     // Print warning for S-band in single pol mode
     if(alldata->options.radarWavelength > 7.5 && !alldata->options.dualPol){
@@ -5367,6 +5789,7 @@ int vol2birdSetUp(PolarVolume_t* volume, vol2bird_t* alldata) {
         vol2bird_err_printf("Warning: using MistNet, disabling other segmentation methods\n");
         alldata->options.singlePol = FALSE;
         alldata->options.dualPol = FALSE;
+        alldata->options.texCell = FALSE;
     }
 
     // check that we are requesting the right number of elevation scans for MistNet segmentation model
@@ -5575,6 +5998,8 @@ int vol2birdSetUp(PolarVolume_t* volume, vol2bird_t* alldata) {
 
         vol2birdPrintIndexArrays(alldata);
         vol2birdPrintPointsArray(alldata);
+
+    labTimerReport();
 
     }
 

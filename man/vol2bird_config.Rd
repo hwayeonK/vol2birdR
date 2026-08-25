@@ -40,6 +40,15 @@ extra_config<-vol2bird_config(config)
 
 The \code{Rcpp_Vol2BirdConfig} class object sets the following 'vol2bird' processing options:
 \itemize{
+\item \code{ablation}: Character. Ablation switches for reproducing the individual algorithm
+changes, given as a comma-separated \code{key=value} list, e.g. \code{"border_fix=0,opt_uf=0"}.
+Any key left out is reset to its compiled-in default, so the result depends only on
+the string given. Accepted keys: \code{keep_prev_cells}, \code{pass_rule}, \code{denom_vrad}, \code{opt_uf},
+\code{opt_map}, \code{border_fix}, \code{cell_tex_max}, \code{csv_precision}, \code{timing}, and the two
+experiment keys \code{dbz_mask}, \code{dbz_mask_texmax}. The latter two do not correspond to a
+proposed change: they mask the reflectivity field by texture before single-pol
+detection, an experiment reported in #159. An unknown key is an error.
+Default \code{""} (all changes active).
 \item \code{azimMax}: Numeric. The minimum azimuth (0-360 degrees) used for constructing the bird density profile
 \item \code{azimMin}: Numeric. The maximum azimuth (0-360 degrees) used for constructing the bird density profile
 \item \code{birdRadarCrossSection}: Numeric. Radar cross section in cm^2
@@ -63,6 +72,10 @@ the profile altitude bins. Default \code{sea} level.
 \item \code{rhohvThresMin}: Numeric. Correlation coefficients higher than this threshold will be classified as precipitation. Default 0.95
 \item \code{singlePol}: Logical. Whether to use single-pol moments for filtering meteorological echoes. Default \code{TRUE}
 \item \code{stdDevMinBird}: Numeric. VVP Radial velocity standard deviation threshold. Default 2 m/s.
+\item \code{texCell}: Logical. Whether to use radial velocity texture for filtering chaff echoes. Default \code{FALSE}
+\item \code{texThresMax}: Numeric. Maximum radial velocity texture of a gate to be considered for a texture cell. Default 1 m/s.
+\item \code{texMask}: Logical. Whether to blank the texture of gates without valid reflectivity, or below \code{texMaskDbzMin}, before texture cell detection. Default \code{TRUE}
+\item \code{texMaskDbzMin}: Numeric. Reflectivity below which the texture of a gate is blanked before texture cell detection. Default 0
 \item \code{useClutterMap}: Logical. Whether to use a static clutter map. Default \code{FALSE}
 \item \code{useMistNet}: Logical. Whether to use the 'MistNet' segmentation model. Default \code{FALSE}.
 }

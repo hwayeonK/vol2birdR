@@ -88,9 +88,18 @@ public:
 //' @description The vol2bird configuration used during processing
 //' @keywords internal
 //' @seealso [vol2bird_config()]
+static std::string trim_ablation(const std::string& in) {
+  size_t b = in.find_first_not_of(" \t");
+  if (b == std::string::npos) return "";
+  size_t e = in.find_last_not_of(" \t");
+  return in.substr(b, e - b + 1);
+}
+
 class Vol2BirdConfig {
 private:
   vol2bird_t _alldata;
+  // lab: verbatim ablation string, kept so the property reads back what was set
+  std::string _ablation;
   void initialize_config(vol2bird_t *alldata) {
     strcpy(alldata->misc.filename_pvol, "");
     strcpy(alldata->misc.filename_vp, "");
@@ -132,8 +141,26 @@ private:
     alldata->options.dealiasRecycle = FALSE;
     alldata->options.dualPol = TRUE;
     alldata->options.singlePol = TRUE;
+    alldata->options.texCell = FALSE;
     alldata->options.dbzThresMin = 0.0;
     alldata->options.rhohvThresMin = 0.95;
+    alldata->options.texThresMax = 1.0;
+    alldata->options.texMask = TRUE;
+    alldata->options.texMaskDbzMin = 0.0;
+    alldata->options.dbzMask = DBZMASK;
+    alldata->options.dbzMaskTexMax = DBZMASK_TEXMAX;
+    // lab: ablation switches. Defaults come from constants.h so that this front end
+    // and the configuration-file front end start from the same state.
+    alldata->options.ablKeepPrevCells = KEEP_PREV_CELLS;
+    alldata->options.ablPassRule = PASS_RULE;
+    alldata->options.ablDenomVrad = DENOM_VRAD;
+    alldata->options.ablOptUf = OPT_UF;
+    alldata->options.ablOptMap = OPT_MAP;
+    alldata->options.ablBorderFix = BORDER_FIX;
+    alldata->options.cellTexMax = CELLTEXMAX;
+    alldata->options.csvPrecision = CSV_PRECISION;
+    alldata->options.timing = TIMING;
+    alldata->options.rCellMaxOffset = RCELLMAX_OFFSET;
     alldata->options.resample = FALSE;
     alldata->options.resampleRscale = 500.0;
     alldata->options.resampleNbins = 100;
@@ -231,8 +258,25 @@ public:
     _alldata.options.dealiasRecycle = other._alldata.options.dealiasRecycle;
     _alldata.options.dualPol = other._alldata.options.dualPol;
     _alldata.options.singlePol = other._alldata.options.singlePol;
+    _alldata.options.texCell = other._alldata.options.texCell;
     _alldata.options.dbzThresMin = other._alldata.options.dbzThresMin;
     _alldata.options.rhohvThresMin = other._alldata.options.rhohvThresMin;
+    _alldata.options.texThresMax = other._alldata.options.texThresMax;
+    _alldata.options.texMask = other._alldata.options.texMask;
+    _alldata.options.texMaskDbzMin = other._alldata.options.texMaskDbzMin;
+    _alldata.options.dbzMask = other._alldata.options.dbzMask;
+    _alldata.options.dbzMaskTexMax = other._alldata.options.dbzMaskTexMax;
+    _ablation = other._ablation;
+    _alldata.options.ablKeepPrevCells = other._alldata.options.ablKeepPrevCells;
+    _alldata.options.ablPassRule = other._alldata.options.ablPassRule;
+    _alldata.options.ablDenomVrad = other._alldata.options.ablDenomVrad;
+    _alldata.options.ablOptUf = other._alldata.options.ablOptUf;
+    _alldata.options.ablOptMap = other._alldata.options.ablOptMap;
+    _alldata.options.ablBorderFix = other._alldata.options.ablBorderFix;
+    _alldata.options.cellTexMax = other._alldata.options.cellTexMax;
+    _alldata.options.csvPrecision = other._alldata.options.csvPrecision;
+    _alldata.options.timing = other._alldata.options.timing;
+    _alldata.options.rCellMaxOffset = other._alldata.options.rCellMaxOffset;
     _alldata.options.resample = other._alldata.options.resample;
     _alldata.options.resampleRscale = other._alldata.options.resampleRscale;
     _alldata.options.resampleNbins = other._alldata.options.resampleNbins;
@@ -558,6 +602,13 @@ public:
     _alldata.options.singlePol = v == true ? TRUE : FALSE;
   }
 
+  bool get_texCell() {
+    return _alldata.options.texCell == TRUE ? true : false;
+  }
+  void set_texCell(bool v) {
+    _alldata.options.texCell = v == true ? TRUE : FALSE;
+  }
+
   double get_dbzThresMin() {
     return _alldata.options.dbzThresMin;
   }
@@ -570,6 +621,100 @@ public:
   }
   void set_rhohvThresMin(double v) {
     _alldata.options.rhohvThresMin = v;
+  }
+
+  double get_texThresMax() {
+    return _alldata.options.texThresMax;
+  }
+  void set_texThresMax(double v) {
+    _alldata.options.texThresMax = v;
+  }
+
+  bool get_texMask() {
+    return _alldata.options.texMask == TRUE ? true : false;
+  }
+  void set_texMask(bool v) {
+    _alldata.options.texMask = v == true ? TRUE : FALSE;
+  }
+
+  double get_texMaskDbzMin() {
+    return _alldata.options.texMaskDbzMin;
+  }
+  void set_texMaskDbzMin(double v) {
+    _alldata.options.texMaskDbzMin = v;
+  }
+
+  // lab: ablation switches, exposed as one "key=value,key=value" string rather than as
+  // one property per switch. These are debugging knobs for reproducing the individual
+  // changes, not part of the configuration interface, and there are eleven of them.
+  //
+  // dbz_mask and dbz_mask_texmax are different in kind from the rest: they do not
+  // correspond to any proposed change, so turning them off is not "upstream behaviour".
+  // They reproduce the experiment reported in #159 - masking the reflectivity field by
+  // texture improves the single-pol filter on its own, but makes it converge on the
+  // texture channel, so the S+T combination loses its complementarity.
+  //
+  // rcellmax_offset is deliberately not accepted here: on this path misc.rCellMax is
+  // derived from rangeMax with the RCELLMAX_OFFSET macro (see set_rangeMax), so setting
+  // the option field would have no effect.
+  std::string get_ablation() {
+    return _ablation;
+  }
+
+  void set_ablation(std::string v) {
+    // start from the compiled-in defaults, so the result depends only on this string
+    _alldata.options.ablKeepPrevCells = KEEP_PREV_CELLS;
+    _alldata.options.ablPassRule = PASS_RULE;
+    _alldata.options.ablDenomVrad = DENOM_VRAD;
+    _alldata.options.ablOptUf = OPT_UF;
+    _alldata.options.ablOptMap = OPT_MAP;
+    _alldata.options.ablBorderFix = BORDER_FIX;
+    _alldata.options.cellTexMax = CELLTEXMAX;
+    _alldata.options.csvPrecision = CSV_PRECISION;
+    _alldata.options.timing = TIMING;
+
+    size_t pos = 0;
+    while (pos <= v.size()) {
+      size_t end = v.find(',', pos);
+      if (end == std::string::npos) end = v.size();
+      std::string item = trim_ablation(v.substr(pos, end - pos));
+      pos = end + 1;
+      if (item.empty()) continue;
+
+      size_t eq = item.find('=');
+      if (eq == std::string::npos) {
+        Rcpp::stop("ablation: expected 'key=value', got '" + item + "'");
+      }
+      std::string key = trim_ablation(item.substr(0, eq));
+      std::string val = trim_ablation(item.substr(eq + 1));
+      if (val.empty()) {
+        Rcpp::stop("ablation: missing value for key '" + key + "'");
+      }
+
+      char* endp = NULL;
+      double num = strtod(val.c_str(), &endp);
+      if (endp == val.c_str() || *endp != '\0') {
+        Rcpp::stop("ablation: value for '" + key + "' is not a number: '" + val + "'");
+      }
+
+      if      (key == "keep_prev_cells")        _alldata.options.ablKeepPrevCells = (int) num;
+      else if (key == "pass_rule")        _alldata.options.ablPassRule = (int) num;
+      else if (key == "denom_vrad")       _alldata.options.ablDenomVrad = (int) num;
+      else if (key == "opt_uf")           _alldata.options.ablOptUf = (int) num;
+      else if (key == "opt_map")          _alldata.options.ablOptMap = (int) num;
+      else if (key == "border_fix")       _alldata.options.ablBorderFix = (int) num;
+      else if (key == "cell_tex_max")     _alldata.options.cellTexMax = (float) num;
+      else if (key == "csv_precision")    _alldata.options.csvPrecision = (int) num;
+      else if (key == "timing")           _alldata.options.timing = (int) num;
+      // experiment, not a proposed change - see the note above
+      else if (key == "dbz_mask")         _alldata.options.dbzMask = (int) num;
+      else if (key == "dbz_mask_texmax")  _alldata.options.dbzMaskTexMax = (float) num;
+      else {
+        Rcpp::stop("ablation: unknown key '" + key + "'");
+      }
+    }
+
+    _ablation = v;
   }
 
   bool get_resample() {
@@ -1074,8 +1219,13 @@ RCPP_MODULE(Vol2BirdConfig) {
       .property("dealiasRecycle", &Vol2BirdConfig::get_dealiasRecycle, &Vol2BirdConfig::set_dealiasRecycle)
       .property("dualPol", &Vol2BirdConfig::get_dualPol, &Vol2BirdConfig::set_dualPol)
       .property("singlePol", &Vol2BirdConfig::get_singlePol, &Vol2BirdConfig::set_singlePol)
+      .property("texCell", &Vol2BirdConfig::get_texCell, &Vol2BirdConfig::set_texCell)
       .property("dbzThresMin", &Vol2BirdConfig::get_dbzThresMin, &Vol2BirdConfig::set_dbzThresMin)
       .property("rhohvThresMin", &Vol2BirdConfig::get_rhohvThresMin, &Vol2BirdConfig::set_rhohvThresMin)
+      .property("texThresMax", &Vol2BirdConfig::get_texThresMax, &Vol2BirdConfig::set_texThresMax)
+      .property("texMask", &Vol2BirdConfig::get_texMask, &Vol2BirdConfig::set_texMask)
+      .property("texMaskDbzMin", &Vol2BirdConfig::get_texMaskDbzMin, &Vol2BirdConfig::set_texMaskDbzMin)
+      .property("ablation", &Vol2BirdConfig::get_ablation, &Vol2BirdConfig::set_ablation)
       .property("resample", &Vol2BirdConfig::get_resample, &Vol2BirdConfig::set_resample)
       .property("resampleRscale", &Vol2BirdConfig::get_resampleRscale, &Vol2BirdConfig::set_resampleRscale)
       .property("resampleNbins", &Vol2BirdConfig::get_resampleNbins, &Vol2BirdConfig::set_resampleNbins)

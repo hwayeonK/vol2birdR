@@ -26,6 +26,15 @@
 #'
 #' ## User configuration options
 #' The `Rcpp_Vol2BirdConfig` class object sets the following 'vol2bird' processing options:
+#' * `ablation`: Character. Ablation switches for reproducing the individual algorithm
+#' changes, given as a comma-separated `key=value` list, e.g. `"border_fix=0,opt_uf=0"`.
+#' Any key left out is reset to its compiled-in default, so the result depends only on
+#' the string given. Accepted keys: `keep_prev_cells`, `pass_rule`, `denom_vrad`, `opt_uf`,
+#' `opt_map`, `border_fix`, `cell_tex_max`, `csv_precision`, `timing`, and the two
+#' experiment keys `dbz_mask`, `dbz_mask_texmax`. The latter two do not correspond to a
+#' proposed change: they mask the reflectivity field by texture before single-pol
+#' detection, an experiment reported in #159. An unknown key is an error.
+#' Default `""` (all changes active).
 #' * `azimMax`: Numeric. The minimum azimuth (0-360 degrees) used for constructing the bird density profile
 #' * `azimMin`: Numeric. The maximum azimuth (0-360 degrees) used for constructing the bird density profile
 #' * `birdRadarCrossSection`: Numeric. Radar cross section in cm^2
@@ -49,6 +58,10 @@
 #' * `rhohvThresMin`: Numeric. Correlation coefficients higher than this threshold will be classified as precipitation. Default 0.95
 #' * `singlePol`: Logical. Whether to use single-pol moments for filtering meteorological echoes. Default `TRUE`
 #' * `stdDevMinBird`: Numeric. VVP Radial velocity standard deviation threshold. Default 2 m/s.
+#' * `texCell`: Logical. Whether to use radial velocity texture for filtering chaff echoes. Default `FALSE`
+#' * `texThresMax`: Numeric. Maximum radial velocity texture of a gate to be considered for a texture cell. Default 1 m/s.
+#' * `texMask`: Logical. Whether to blank the texture of gates without valid reflectivity, or below `texMaskDbzMin`, before texture cell detection. Default `TRUE`
+#' * `texMaskDbzMin`: Numeric. Reflectivity below which the texture of a gate is blanked before texture cell detection. Default 0
 #' * `useClutterMap`: Logical. Whether to use a static clutter map. Default `FALSE`
 #' * `useMistNet`: Logical. Whether to use the 'MistNet' segmentation model. Default `FALSE`.
 #'

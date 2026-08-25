@@ -284,6 +284,52 @@ test_that("rhohvThresMin",{
   expect_equal(a$rhohvThresMin, 4.0, tolerance = 0.0001)
 })
 
+test_that("ablation round-trips and rejects bad input",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$ablation, "")
+  a$ablation<-"border_fix=0,opt_uf=0"
+  expect_equal(a$ablation, "border_fix=0,opt_uf=0")
+  # keys not mentioned fall back to the compiled-in defaults
+  a$ablation<-"timing=1"
+  expect_equal(a$ablation, "timing=1")
+  expect_error(a$ablation<-"boder_fix=0", "unknown key")
+  expect_error(a$ablation<-"border_fix", "expected 'key=value'")
+  expect_error(a$ablation<-"border_fix=yes", "not a number")
+  # texmask/texmask_dbzmin are first-class properties now, not ablation keys
+  expect_error(a$ablation<-"texmask=1", "unknown key")
+  # experiment keys: no proposed change corresponds to these
+  a$ablation<-"dbz_mask=1,dbz_mask_texmax=1"
+  expect_equal(a$ablation, "dbz_mask=1,dbz_mask_texmax=1")
+})
+
+test_that("texCell",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$texCell, FALSE)
+  a$texCell<-TRUE
+  expect_equal(a$texCell, TRUE)
+})
+
+test_that("texThresMax",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$texThresMax, 1.0, tolerance = 0.0001)
+  a$texThresMax<-4.0
+  expect_equal(a$texThresMax, 4.0, tolerance = 0.0001)
+})
+
+test_that("texMask",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$texMask, TRUE)
+  a$texMask<-FALSE
+  expect_equal(a$texMask, FALSE)
+})
+
+test_that("texMaskDbzMin",{
+  a<-Vol2BirdConfig$new()
+  expect_equal(a$texMaskDbzMin, 0.0, tolerance = 0.0001)
+  a$texMaskDbzMin<-7.0
+  expect_equal(a$texMaskDbzMin, 7.0, tolerance = 0.0001)
+})
+
 test_that("resample",{
   a<-Vol2BirdConfig$new()
   expect_equal(a$resample, FALSE)

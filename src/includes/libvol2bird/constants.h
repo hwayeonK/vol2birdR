@@ -121,6 +121,8 @@
 #define NODATA -1000
 // name under which the calculated texture quantity will be stored
 #define TEXNAME "VTEX"
+// name under which the masked copy of the texture field is stored
+#define MASKEDTEXNAME "VTEXMASKED"
 // name under which the calculated raincell masking quantity will be stored
 #define CELLNAME "CELL"
 // name of the parameter containing the static cluttermap
@@ -199,6 +201,31 @@
 // (aka the texture) is less than cellStdDevMax are considered in the
 // rest of the analysis
 #define STDEV_CELL 5.0f
+// maximum vrad texture of a gate to be considered for a texture cell
+#define TEXMAX 1.0f
+// whether to mask the texture field with reflectivity before texture cell detection
+#define TEXMASK 1
+// reflectivity floor used by that mask
+#define TEXMASK_DBZMIN 0.0
+
+//-------------------------------------------------------//
+//   dbz masking - experiment, not a proposed change     //
+//-------------------------------------------------------//
+// Unlike the other ablation switches this one maps to no PR; off is not "upstream".
+// The mirror image of the texture mask: mask a copy of the reflectivity field by
+// texture and let the single-pol detection read that copy, so cells contain only
+// low-texture gates and the cellStdDevMax judgement works on a meaningful mean.
+// Result reported in adokter/vol2birdR#159, kept here so it can be reproduced.
+
+// name under which the masked copy of the reflectivity field is stored (10 chars max)
+#define MASKEDDBZNAME "VDBZMASKED"
+
+// whether to mask the reflectivity field before single-pol cell detection. Off by default.
+#define DBZMASK 0
+
+// texture ceiling [m/s] above which gates are masked out of the reflectivity copy.
+// the same threshold the single-pol drop rule applies to the cell mean.
+#define DBZMASK_TEXMAX STDEV_CELL
 // default VVP Radial velocity standard deviation threshold C-band (< 7.5 cm)
 #define STDEV_BIRD 2.0f
 // default VVP Radial velocity standard deviation threshold S-band (>= 7.5 cm)
@@ -231,6 +258,8 @@
 #define DUALPOL 1
 // whether to use single-pol moments for filtering meteorological echoes
 #define SINGLEPOL 1
+// whether to use texture-based cell detection (off by default)
+#define TEXCELL 0
 // correlation coefficients higher than this threshold will be classified as precipitation
 #define RHOHVMIN 0.95f
 // whether to resample the input polar volume
@@ -255,6 +284,34 @@
 // require that radial velocity and spectrum width pixels rendered as mistnet input
 // have a valid corresponding reflectivity value
 #define MISTNET_REQUIRE_DBZ 0
+
+
+
+//-------------------------------------------------------//
+//   lab build only - ablation switches and refinements  //
+//-------------------------------------------------------//
+// Defaults below reproduce the behaviour of the shared version, so an
+// options.conf that sets none of them yields identical output.
+// RCELLMAX_OFFSET (above) is exposed as an option in this build as well.
+
+// mean texture above which a texture cell is dropped; 0 disables the criterion,
+// leaving texture cells to be judged on area only. Detection keeps only gates with
+// texture <= TEXMAX, so a value above TEXMAX never triggers.
+#define CELLTEXMAX 0.0f
+
+// ablation switches
+#define KEEP_PREV_CELLS 1 // cells found by an earlier detection pass keep their labels and drop status
+#define PASS_RULE 1       // each pass finalises its own cells with its own rule
+#define DENOM_VRAD 1      // keep vradTooLow gates in the denominator of the layer average
+#define OPT_UF 1          // union-find cell merging
+#define OPT_MAP 1         // lookup-table renumbering in updateMap
+#define BORDER_FIX 1      // re-read the cell label at the azimuth border before merging
+
+// report accumulated time per instrumented section to stderr at the end of the run
+#define TIMING 0
+
+// local input/output conventions
+#define CSV_PRECISION 1    // write the CSV profile with 4 decimals (0 = upstream 2 decimals)
 // height reference used, 0 for sea level, 1 for antenna level, 2 for ground level
 #define HEIGHT_REFERENCE 0
 // scan parameter name containing ground height data in m relative to sea level
