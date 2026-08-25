@@ -133,8 +133,12 @@ struct vol2birdOptions {
     int dealiasRecycle;             /* whether we should dealias once, or separately for each profile type */
     int dualPol;                    /* whether to use dual-polarization moments for filtering meteorological echoes */
     int singlePol;                  /* whether to use single-polarization moments for filtering meteorological echoes */
+    int texCell;                    /* whether to use texture-based cell filtering */
     float dbzThresMin;              /* reflectivities above this threshold will be checked as potential precipitation */
     float rhohvThresMin;            /* correlation coefficients above this threshold will be removed as precipitation */
+    float texThresMax;              /* maximum vrad texture of a gate to be considered for a texture cell */
+    int texMask;                    /* whether to mask the texture field with reflectivity before texture cell detection */
+    float texMaskDbzMin;            /* reflectivity floor used by that mask */
     int resample;                   /* whether to resample the input polar volume */
     float resampleRscale;           /* resampled range gate length in m */
     int resampleNbins;              /* resampled number of range bins */

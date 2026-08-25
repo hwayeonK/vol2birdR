@@ -121,6 +121,8 @@
 #define NODATA -1000
 // name under which the calculated texture quantity will be stored
 #define TEXNAME "VTEX"
+// name under which the masked copy of the texture field is stored
+#define MASKEDTEXNAME "VTEXMASKED"
 // name under which the calculated raincell masking quantity will be stored
 #define CELLNAME "CELL"
 // name of the parameter containing the static cluttermap
@@ -199,6 +201,12 @@
 // (aka the texture) is less than cellStdDevMax are considered in the
 // rest of the analysis
 #define STDEV_CELL 5.0f
+// maximum vrad texture of a gate to be considered for a texture cell
+#define TEXMAX 1.0f
+// whether to mask the texture field with reflectivity before texture cell detection
+#define TEXMASK 1
+// reflectivity floor used by that mask
+#define TEXMASK_DBZMIN 0.0
 // default VVP Radial velocity standard deviation threshold C-band (< 7.5 cm)
 #define STDEV_BIRD 2.0f
 // default VVP Radial velocity standard deviation threshold S-band (>= 7.5 cm)
@@ -231,6 +239,8 @@
 #define DUALPOL 1
 // whether to use single-pol moments for filtering meteorological echoes
 #define SINGLEPOL 1
+// whether to use texture-based cell detection (off by default)
+#define TEXCELL 0
 // correlation coefficients higher than this threshold will be classified as precipitation
 #define RHOHVMIN 0.95f
 // whether to resample the input polar volume

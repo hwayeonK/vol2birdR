@@ -49,6 +49,10 @@
 #' * `rhohvThresMin`: Numeric. Correlation coefficients higher than this threshold will be classified as precipitation. Default 0.95
 #' * `singlePol`: Logical. Whether to use single-pol moments for filtering meteorological echoes. Default `TRUE`
 #' * `stdDevMinBird`: Numeric. VVP Radial velocity standard deviation threshold. Default 2 m/s.
+#' * `texCell`: Logical. Whether to use radial velocity texture for filtering chaff echoes. Default `FALSE`
+#' * `texThresMax`: Numeric. Maximum radial velocity texture of a gate to be considered for a texture cell. Default 1 m/s.
+#' * `texMask`: Logical. Whether to blank the texture of gates without valid reflectivity, or below `texMaskDbzMin`, before texture cell detection. Default `TRUE`
+#' * `texMaskDbzMin`: Numeric. Reflectivity below which the texture of a gate is blanked before texture cell detection. Default 0
 #' * `useClutterMap`: Logical. Whether to use a static clutter map. Default `FALSE`
 #' * `useMistNet`: Logical. Whether to use the 'MistNet' segmentation model. Default `FALSE`.
 #'

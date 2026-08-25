@@ -63,6 +63,10 @@ the profile altitude bins. Default \code{sea} level.
 \item \code{rhohvThresMin}: Numeric. Correlation coefficients higher than this threshold will be classified as precipitation. Default 0.95
 \item \code{singlePol}: Logical. Whether to use single-pol moments for filtering meteorological echoes. Default \code{TRUE}
 \item \code{stdDevMinBird}: Numeric. VVP Radial velocity standard deviation threshold. Default 2 m/s.
+\item \code{texCell}: Logical. Whether to use radial velocity texture for filtering chaff echoes. Default \code{FALSE}
+\item \code{texThresMax}: Numeric. Maximum radial velocity texture of a gate to be considered for a texture cell. Default 1 m/s.
+\item \code{texMask}: Logical. Whether to blank the texture of gates without valid reflectivity, or below \code{texMaskDbzMin}, before texture cell detection. Default \code{TRUE}
+\item \code{texMaskDbzMin}: Numeric. Reflectivity below which the texture of a gate is blanked before texture cell detection. Default 0
 \item \code{useClutterMap}: Logical. Whether to use a static clutter map. Default \code{FALSE}
 \item \code{useMistNet}: Logical. Whether to use the 'MistNet' segmentation model. Default \code{FALSE}.
 }
