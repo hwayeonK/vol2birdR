@@ -4168,6 +4168,7 @@ void vol2birdCalcProfiles(vol2bird_t *alldata) {
         int iPointIncludedZ;
         int nPointsIncluded;
         int nPointsIncludedZ;
+        int nPointsDenominator;
 
         float parameterVector[] = { NAN, NAN, NAN };
         float avar[] = { NAN, NAN, NAN };
@@ -4221,6 +4222,7 @@ void vol2birdCalcProfiles(vol2bird_t *alldata) {
 
         //Calculate the average reflectivity Z of the layer
         iPointIncludedZ = 0;
+        nPointsDenominator = 0;
         for (iPointLayer = iPointFrom; iPointLayer < iPointFrom + nPointsLayer; iPointLayer++) {
 
           unsigned int gateCode = (unsigned int) alldata->points.points[iPointLayer * alldata->points.nColsPoints + alldata->points.gateCodeCol];
@@ -4241,13 +4243,21 @@ void vol2birdCalcProfiles(vol2bird_t *alldata) {
             iPointIncludedZ += 1;
 
           }
+
+          // nPointsDenominator = nPointsIncludedZ + the gates rejected only for vradTooLow
+          if (includeGate(iProfileType, 0, gateCode & ~(1 << alldata->flags.flagPositionVradTooLow), alldata) == TRUE) {
+            nPointsDenominator += 1;
+          }
+
         } // endfor (iPointLayer = 0; iPointLayer < nPointsLayer; iPointLayer++) {
         nPointsIncludedZ = iPointIncludedZ;
 
         // calculate bird densities from undbzSum
-        if (nPointsIncludedZ > alldata->constants.nPointsIncludedMin) {
+        // nPointsDenominator is used both as the denominator and for the "enough points" test
+        // n_dbz (profile column 13) and the hasGap test below still use nPointsIncludedZ.
+        if (nPointsDenominator > alldata->constants.nPointsIncludedMin) {
           // when there are enough valid points, convert undbzAvg back to dB-scale
-          undbzAvg = (float) (undbzSum / nPointsIncludedZ);
+          undbzAvg = (float) (undbzSum / nPointsDenominator);
           dbzAvg = (10 * log(undbzAvg)) / log(10);
         } else {
           undbzAvg = UNDETECT;
