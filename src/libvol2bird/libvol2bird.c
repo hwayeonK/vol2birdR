@@ -3225,16 +3225,16 @@ void write_line_vpts_profile(char* printbuffer, int buflen,
   memset(printbuffer, 0, sizeof(char)*buflen);
 
   snprintf(s_HGHT, sizeof(s_HGHT), "%4.f", HGHT);
-  nanify_vpts(s_u, "%6.2f", u);
-  nanify_vpts(s_v, "%6.2f", v);
-  nanify_vpts(s_w, "%7.2f", w);
-  nanify_vpts(s_ff, "%5.2f", ff);
-  nanify_vpts(s_dd, "%5.1f", dd);
-  nanify_vpts(s_sd_vvp, "%5.2f", sd_vvp);
-  nanify_vpts(s_dbz, "%6.2f", dbz);
-  nanify_vpts(s_eta, "%6.1f", eta);
-  nanify_vpts(s_dens, "%6.2f", dens);
-  nanify_vpts(s_DBZH, "%6.2f", DBZH);
+  nanify_vpts(s_u, "%6.4f", u);
+  nanify_vpts(s_v, "%6.4f", v);
+  nanify_vpts(s_w, "%7.4f", w);
+  nanify_vpts(s_ff, "%5.4f", ff);
+  nanify_vpts(s_dd, "%5.4f", dd);
+  nanify_vpts(s_sd_vvp, "%5.4f", sd_vvp);
+  nanify_vpts(s_dbz, "%6.4f", dbz);
+  nanify_vpts(s_eta, "%6.4f", eta);
+  nanify_vpts(s_dens, "%6.4f", dens);
+  nanify_vpts(s_DBZH, "%6.4f", DBZH);
   nanify_vpts(s_n, "%5.f", n);
   nanify_vpts(s_n_dbz, "%5.f", n_dbz);
   nanify_vpts(s_n_all, "%5.f", n_all);
